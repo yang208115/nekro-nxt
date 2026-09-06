@@ -70,7 +70,7 @@ export type ExtensionContribution =
 
 export interface HostAdapterContributionEvidence {
   readonly kind: 'adapter'
-  readonly apiVersion: 1
+  readonly apiVersion: 2
   readonly key: string
   readonly descriptorDigest: string
 }
@@ -146,7 +146,7 @@ export interface ExtensionRevisionVerification {
   readonly pageGeometry?: readonly HostUiPageGeometryEvidence[]
   readonly permissions?: HostUiPermissionDeclaration
   readonly adapter?: {
-    readonly apiVersion: 1
+    readonly apiVersion: 2
     readonly key: string
     readonly descriptorDigest: string
     readonly registered: boolean

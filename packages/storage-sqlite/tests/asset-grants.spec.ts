@@ -21,16 +21,16 @@ describe('channel-scoped Asset grants', () => {
     const repository = new SqliteCoreRepository(database)
     let sequence = 0
     const core = new CoreService(repository, { now: () => 100, nextUlid: () => `G${++sequence}` })
-    const connection = core.createConnection({ adapterKey: 'web', config: {} })
+    const connection = core.createConnection({ adapterKey: 'fixture-alpha', config: {} })
     const currentChannel = core.createChannel({
       connectionId: connection.id,
       platformChannelId: 'current',
-      kind: 'web',
+      kind: 'internal',
     })
     const otherChannel = core.createChannel({
       connectionId: connection.id,
       platformChannelId: 'other',
-      kind: 'web',
+      kind: 'internal',
     })
     const prepared = await new AssetService(repository, path.join(directory, 'assets'), {
       now: () => 101,

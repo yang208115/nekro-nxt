@@ -25,40 +25,9 @@ import {
 } from '../ui-kit/index.js'
 import { isTriggerPolicy, TRIGGER_POLICY_OPTIONS } from './binding-task.js'
 import styles from './product-pages.module.css'
+import type { AdapterActivityKey } from '@nekro-nxt/contracts'
 
 const VIEW_KEY = 'nekro-nxt.channel-view'
-
-type ChannelActivityType = ChannelSummary['bindings'][number]['eventTriggers'][number]
-
-const CHANNEL_ACTIVITY_OPTIONS: readonly {
-  readonly value: ChannelActivityType
-  readonly label: string
-  readonly description: string
-}[] = [
-  { value: 'member-poked', label: '戳一戳', description: '成员戳一戳时允许触发智能体。' },
-  { value: 'profile-liked', label: '资料卡点赞', description: '成员资料卡收到点赞时允许触发。' },
-  { value: 'member-joined', label: '成员加入', description: '新成员加入频道时允许触发。' },
-  { value: 'member-left', label: '成员离开', description: '成员退出或被移出频道时允许触发。' },
-  { value: 'member-muted', label: '成员被禁言', description: '成员被禁言时允许触发。' },
-  { value: 'member-unmuted', label: '解除禁言', description: '成员解除禁言时允许触发。' },
-  { value: 'member-admin-set', label: '设为管理员', description: '成员成为管理员时允许触发。' },
-  { value: 'member-admin-unset', label: '取消管理员', description: '成员不再是管理员时允许触发。' },
-  { value: 'member-card-changed', label: '成员名片变化', description: '成员的频道名片变化时允许触发。' },
-  { value: 'member-title-changed', label: '成员头衔变化', description: '成员头衔变化时允许触发。' },
-  { value: 'channel-name-changed', label: '频道名称变化', description: '外部平台频道名称变化时允许触发。' },
-  { value: 'message-recalled', label: '消息撤回', description: '频道消息被撤回时允许触发。' },
-  { value: 'message-reaction-added', label: '添加消息回应', description: '消息收到新的表情回应时允许触发。' },
-  { value: 'message-reaction-removed', label: '移除消息回应', description: '消息回应被移除时允许触发。' },
-  { value: 'file-uploaded', label: '文件上传', description: '频道中上传文件时允许触发。' },
-  { value: 'essence-added', label: '设为精华', description: '消息被设为精华时允许触发。' },
-  { value: 'essence-removed', label: '取消精华', description: '消息被取消精华时允许触发。' },
-  { value: 'friend-added', label: '新增好友', description: '连接账号新增好友时允许触发。' },
-  { value: 'conversation-entered', label: '进入会话', description: '成员进入与机器人账号的会话时允许触发。' },
-  { value: 'card-action-invoked', label: '卡片操作', description: '成员操作交互式卡片时允许触发。' },
-  { value: 'message-feedback-positive', label: '正向反馈', description: '成员认可一条回复时允许触发。' },
-  { value: 'message-feedback-negative', label: '负向反馈', description: '成员反馈回复不准确时允许触发。' },
-  { value: 'message-feedback-withdrawn', label: '撤销反馈', description: '成员撤销回复反馈时允许触发。' },
-]
 
 export type ChannelCanvasView = 'chat' | 'trajectory'
 
@@ -1038,6 +1007,25 @@ export function ChannelSessionInspector({
   const connection = useProductStore((state) =>
     state.connections.find((candidate) => candidate.id === channel.connectionId),
   )
+  const descriptor = useProductStore((state) =>
+    state.connectionAdapters.find((candidate) => candidate.key === connection?.adapterKey),
+  )
+  const channelActivities = (descriptor?.activities ?? []).filter((activity) => {
+    const capability = connection?.activityCapabilities[activity.key]
+    return (
+      activity.scope === 'channel' &&
+      activity.triggerable &&
+      activity.channelKinds?.includes(channel.kind) === true &&
+      capability?.state !== 'disabled' &&
+      capability?.state !== 'unsupported'
+    )
+  })
+  const processingFeedbackCapability = connection?.processingFeedbackCapability
+  const showProcessingFeedback =
+    channel.kind !== 'internal' &&
+    descriptor?.features.processingFeedback?.channelKinds.includes(channel.kind) === true &&
+    processingFeedbackCapability?.state !== 'disabled' &&
+    processingFeedbackCapability?.state !== 'unsupported'
   const phase = runtime?.phase ?? channel.runtimePhase
   const [renamePending, setRenamePending] = useState(false)
   const [triggerPending, setTriggerPending] = useState(false)
@@ -1096,7 +1084,7 @@ export function ChannelSessionInspector({
         channelId: channel.id,
         triggerPolicy,
         processingFeedback: currentBinding?.processingFeedback ?? 'auto',
-        eventTriggers: currentBinding?.eventTriggers ?? [],
+        activityTriggerOverrides: currentBinding?.activityTriggerOverrides ?? {},
       })
       notify('响应方式已更新。', 'success', `channel-trigger:${channel.id}`)
     } catch (error) {
@@ -1108,7 +1096,7 @@ export function ChannelSessionInspector({
 
   const updateBindingOptions = async (input: {
     readonly processingFeedback?: 'auto' | 'off'
-    readonly eventTriggers?: readonly ChannelActivityType[]
+    readonly activityTriggerOverrides?: Readonly<Record<AdapterActivityKey, boolean>>
   }): Promise<void> => {
     if (!agent || triggerPending) return
     setTriggerPending(true)
@@ -1118,7 +1106,7 @@ export function ChannelSessionInspector({
         channelId: channel.id,
         triggerPolicy: currentTrigger,
         processingFeedback: input.processingFeedback ?? currentBinding?.processingFeedback ?? 'auto',
-        eventTriggers: [...(input.eventTriggers ?? currentBinding?.eventTriggers ?? [])],
+        activityTriggerOverrides: input.activityTriggerOverrides ?? currentBinding?.activityTriggerOverrides ?? {},
       })
       notify('频道事件设置已更新。', 'success', `channel-events:${channel.id}`)
     } catch (error) {
@@ -1183,7 +1171,7 @@ export function ChannelSessionInspector({
           adapterKey={connection.adapterKey}
           connectionId={connection.id}
           channelId={channel.id}
-          channelKind={channel.kind === 'web' ? 'web' : channel.kind === 'qq-group' ? 'group' : 'direct'}
+          channelKind={channel.kind}
         />
       ) : null}
       <section className={styles.inspectorPanel}>
@@ -1210,7 +1198,7 @@ export function ChannelSessionInspector({
             <div className={styles.bindingSettings}>
               <div className={styles.bindingSourceRow}>
                 <span>频道来源</span>
-                <strong>{channel.kind === 'web' ? '内置频道' : channel.connectionName}</strong>
+                <strong>{channel.kind === 'internal' ? '内置频道' : channel.connectionName}</strong>
               </div>
               <SelectField
                 label="响应方式"
@@ -1221,17 +1209,21 @@ export function ChannelSessionInspector({
                 }}
                 options={TRIGGER_POLICY_OPTIONS.map((option) => ({ value: option.value, label: option.label }))}
               />
-              {channel.kind === 'web' ? null : (
+              {showProcessingFeedback ? (
+                <SwitchField
+                  label="显示处理中状态"
+                  description={
+                    processingFeedbackCapability?.reason ?? '在智能体处理期间为触发消息添加临时回应，结束后自动移除。'
+                  }
+                  checked={(currentBinding?.processingFeedback ?? 'auto') === 'auto'}
+                  disabled={triggerPending}
+                  onCheckedChange={(checked) =>
+                    void updateBindingOptions({ processingFeedback: checked ? 'auto' : 'off' })
+                  }
+                />
+              ) : null}
+              {channelActivities.length > 0 ? (
                 <>
-                  <SwitchField
-                    label="显示处理中状态"
-                    description="平台支持时，在智能体处理期间为触发消息添加临时回应，结束后自动移除。"
-                    checked={(currentBinding?.processingFeedback ?? 'auto') === 'auto'}
-                    disabled={triggerPending}
-                    onCheckedChange={(checked) =>
-                      void updateBindingOptions({ processingFeedback: checked ? 'auto' : 'off' })
-                    }
-                  />
                   <Button
                     size="small"
                     variant="ghost"
@@ -1242,28 +1234,35 @@ export function ChannelSessionInspector({
                   </Button>
                   <Disclosure open={eventsOpen}>
                     <div className={styles.bindingEventSettings}>
-                      <p className={styles.secondaryText}>特殊事件默认只记录。逐项开启的事件会触发智能体。</p>
-                      {CHANNEL_ACTIVITY_OPTIONS.map((option) => (
-                        <SwitchField
-                          key={option.value}
-                          label={option.label}
-                          description={option.description}
-                          checked={currentBinding?.eventTriggers.includes(option.value) ?? false}
-                          disabled={triggerPending || currentTrigger === 'observe-only'}
-                          onCheckedChange={(checked) => {
-                            const current = currentBinding?.eventTriggers ?? []
-                            void updateBindingOptions({
-                              eventTriggers: checked
-                                ? [...new Set([...current, option.value])]
-                                : current.filter((value) => value !== option.value),
-                            })
-                          }}
-                        />
-                      ))}
+                      <p className={styles.secondaryText}>默认跟随所属连接；这里只保存这个频道的例外。</p>
+                      {channelActivities.map((activity) => {
+                        const override = currentBinding?.activityTriggerOverrides[activity.key]
+                        const enabledByDefault = connection?.activityTriggerDefaults.includes(activity.key) === true
+                        return (
+                          <SelectField
+                            key={activity.key}
+                            label={activity.displayName}
+                            helper={connection?.activityCapabilities[activity.key]?.reason ?? activity.description}
+                            value={override === undefined ? 'inherit' : override ? 'on' : 'off'}
+                            disabled={triggerPending || currentTrigger === 'observe-only'}
+                            options={[
+                              { value: 'inherit', label: `跟随连接（当前${enabledByDefault ? '开启' : '关闭'}）` },
+                              { value: 'on', label: '此频道开启' },
+                              { value: 'off', label: '此频道关闭' },
+                            ]}
+                            onValueChange={(value) => {
+                              const current = { ...(currentBinding?.activityTriggerOverrides ?? {}) }
+                              if (value === 'inherit') delete current[activity.key]
+                              else current[activity.key] = value === 'on'
+                              void updateBindingOptions({ activityTriggerOverrides: current })
+                            }}
+                          />
+                        )
+                      })}
                     </div>
                   </Disclosure>
                 </>
-              )}
+              ) : null}
             </div>
           </div>
         ) : (
@@ -1299,7 +1298,7 @@ export function ChannelSessionInspector({
             <div className={styles.channelRename}>
               <Field
                 label="频道名称"
-                hint={channel.kind === 'web' ? '用于消息列表显示。' : '平台未提供频道名称时，可在此设置本地名称。'}
+                hint={channel.kind === 'internal' ? '用于消息列表显示。' : '平台未提供频道名称时，可在此设置本地名称。'}
               >
                 <Input value={channelName} onChange={(event) => setChannelName(event.target.value)} maxLength={120} />
               </Field>
@@ -1325,15 +1324,15 @@ export function ChannelSessionInspector({
         </div>
         <div className={styles.channelDangerRow}>
           <div>
-            <strong>{channel.kind === 'web' ? '删除内置频道' : '从 NekroNXT 移除'}</strong>
+            <strong>{channel.kind === 'internal' ? '删除内置频道' : '从 NekroNXT 移除'}</strong>
             <span>
-              {channel.kind === 'web'
+              {channel.kind === 'internal'
                 ? '解除绑定并移出频道列表；历史记录可在审计中查询。'
                 : '解除绑定并移出 NekroNXT 频道列表。'}
             </span>
           </div>
           <Button size="small" variant="danger" onClick={onDelete}>
-            <Trash2 size={13} aria-hidden="true" /> {channel.kind === 'web' ? '删除' : '移除'}
+            <Trash2 size={13} aria-hidden="true" /> {channel.kind === 'internal' ? '删除' : '移除'}
           </Button>
         </div>
       </section>

@@ -7,6 +7,7 @@ export const workspaceSourceAliases = {
   '@nekro-nxt/dsh-compat/client': source('dsh-compat', 'src/client.ts'),
   '@nekro-nxt/dsh-compat': source('dsh-compat'),
   '@nekro-nxt/adapter-sdk': source('adapter-sdk'),
+  '@nekro-nxt/adapter-builtin-roster': source('adapter-builtin-roster'),
   '@nekro-nxt/adapter-onebot-11': source('adapter-onebot-11'),
   '@nekro-nxt/adapter-wecom-ai-bot': source('adapter-wecom-ai-bot'),
   '@nekro-nxt/adapter-qq-openclaw': source('adapter-qq-openclaw'),

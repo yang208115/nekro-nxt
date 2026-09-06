@@ -1,7 +1,7 @@
 import {
   parseAdapterConnectionConfiguration,
   type AdapterConnectionContext,
-  type AdapterInboundEvent,
+  type AdapterChannelInboundEvent,
 } from '@nekro-nxt/adapter-sdk'
 import {
   AssetIdSchema,
@@ -32,7 +32,7 @@ const memberId = ChannelMemberIdSchema.parse('mbr_qq')
 const context: AdapterConnectionContext = {
   connectionId,
   now: () => 100,
-  acceptInbound: () => Promise.reject(new Error('not used')),
+  acceptChannelInbound: () => Promise.reject(new Error('not used')),
 }
 
 describe('QQ OpenClaw Adapter', () => {
@@ -383,11 +383,11 @@ describe('QQ OpenClaw Adapter', () => {
   })
 
   it('commits structured group inbound content, real Mention identity, ordinary video files and quote facts', async () => {
-    const accepted: AdapterInboundEvent[] = []
+    const accepted: AdapterChannelInboundEvent[] = []
     const inboundContext: AdapterConnectionContext = {
       connectionId,
       now: () => 500,
-      acceptInbound: (event) => {
+      acceptChannelInbound: (event) => {
         accepted.push(event)
         return Promise.resolve({
           channelEventId: ChannelEventIdSchema.parse('evt_1'),
@@ -484,12 +484,12 @@ describe('QQ OpenClaw Adapter', () => {
   })
 
   it('collects ordinary group messages without forcing an intelligent-agent trigger', async () => {
-    const accepted: AdapterInboundEvent[] = []
+    const accepted: AdapterChannelInboundEvent[] = []
     const adapter = new QQOpenClawConnection(
       {
         connectionId,
         now: () => 100,
-        acceptInbound: (event) => {
+        acceptChannelInbound: (event) => {
           accepted.push(event)
           return Promise.resolve({
             channelEventId: ChannelEventIdSchema.parse('evt_ordinary'),

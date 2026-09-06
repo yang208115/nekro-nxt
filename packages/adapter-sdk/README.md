@@ -1,11 +1,13 @@
 # Adapter SDK
 
-该包拥有聊天平台 Adapter 与 Channel Runtime 之间的公共契约：入站事实、能力声明、Connection 生命周期、物理发送请求、结构化回执，以及供 Host/UI 消费的版本化连接配置描述。Adapter 不选择智能体、不拼模型上下文、不直接写 Core/DSH 数据库，也不自行无限重试。
+该包拥有聊天平台 Adapter 与 Host 之间的公共契约：Connection 生命周期、频道与连接入站事实、运行能力、物理发送、结构化回执、受限 Host Service，以及供产品消费的版本化 Descriptor。Adapter 不选择智能体、不拼模型上下文、不直接写 Core/DSH 数据库，也不自行无限重试。
 
-Internal Web Adapter 声明为系统托管且不可由用户创建；所有内置和已安装 Adapter 都以 `AdapterHostContributionV1` 注册到同一个 `AdapterRegistry`。Registry 拒绝重复 owner、重复 key、不支持的 API 版本和非法 Schema，注销句柄可等待且幂等。产品先选择 Adapter，再按 descriptor 的 `aliasEditable`、`channelDiscovery`、`diagnostics` 和版本化 schema 渲染通用界面。
+所有内置和已安装 Adapter 都以 `AdapterHostContributionV2` 注册到同一个 `AdapterRegistry`。Registry 只接受 `apiVersion: 2`，并拒绝重复 owner/key、重复活动 key、非法 scope、非法 Channel kind、可触发的 Connection 活动、越界的处理中反馈能力和不合法 Schema。注销句柄可等待且幂等。
 
-`credential-reference` 可用 `credentialKey` 指定持久引用字段；原始值只经过 Host 只写通道，Connection 配置和 Adapter factory 只接收引用。`AdapterConnectionHostContext.transport` 是可替换 HTTP/WebSocket 边界：生产使用 Server 的 `fetch`/`ws`，测试和动态验证使用无网络 Fake。
+Descriptor 声明 `provisioning`、可编辑别名、频道发现方式、`internal | direct | group` 范围、诊断动作、配置 Schema、活动目录和可选处理中反馈。活动 key 是开放字符串；新增活动不修改 contracts、Core 或 Web。Runtime 以 `outbound + activities + processingFeedback` 报告动态能力状态，Host 会核对它与 Descriptor 一致。
 
-`AdapterConnectionContext` 只暴露当前 Connection 可用的频道、成员、消息映射、Asset、Credential、命名空间状态、诊断和 Transport 服务。Adapter 不读取 Core Repository、SQLite 或宿主路径。远程 Asset 默认只允许 HTTPS；协议明确只提供 HTTP 媒体地址时，Adapter 可在单次 `fetchRemoteBytes` 调用中启用公网 HTTP，Host 仍统一拒绝 URL 凭据、重定向和私网目标。Host 统一创建、恢复、测试和停止 Connection Runtime；Connection 网络或凭据失败只形成诊断，不改变 Adapter Revision 的安装事实。
+`AdapterConnectionHostContext` 按当前 Connection 暴露 `channels`、`identities`、`members`、`messages`、`assets`、`credentials`、`state`、`diagnostics` 和 `transport`。`acceptChannelInbound` 只提交属于具体频道的消息或活动；`acceptConnectionInbound` 提交账号和关系事实，不创建 Channel/ChannelMember，也不进入智能体运行时。
 
-特殊平台活动使用公共 `ChannelActivityType` 与可选目标消息关系。Adapter 追加事实，不能通过撤回或回应事件删除、覆盖既有消息事实。
+`credential-reference` 可用 `credentialKey` 指定持久引用字段；原始值只经过 Host 只写通道，Connection 配置和 Adapter factory 只接收引用。`transport` 是可替换的 HTTP/WebSocket 边界：生产使用 Server 网络实现，测试和动态验证使用无网络 Fake。远程 Asset 默认只允许 HTTPS；协议明确需要 HTTP 时可为单次抓取开启公网 HTTP，Host 仍拒绝 URL 凭据、重定向和私网目标。
+
+`AdapterConnectionRuntime.localChannel` 是可选的应用内消息端口。Host 通过 Descriptor 的系统单例与 `internal` 能力发现唯一内置实现，不比较 Adapter key。

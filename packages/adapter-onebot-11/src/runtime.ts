@@ -4,13 +4,19 @@ import type {
   AdapterConnectionRuntime,
   AdapterDeliveryReceipt,
   AdapterInteractionOutcome,
+  AdapterRuntimeCapabilities,
   PhysicalDeliveryRequest,
 } from '@nekro-nxt/adapter-sdk'
 import type { AssetId, ChannelId, ChannelMemberId, JsonValue, MessagePart } from '@nekro-nxt/contracts'
 import { LogicalMessageIdSchema } from '@nekro-nxt/contracts'
 import { createHash } from 'node:crypto'
 import { z } from 'zod'
-import { ONEBOT_11_ADAPTER_KEY, ONEBOT_11_CAPABILITIES, type OneBot11RuntimeConfig } from './definition.js'
+import {
+  ONEBOT_11_ADAPTER_KEY,
+  ONEBOT_11_CAPABILITIES,
+  ONEBOT_11_CONNECTION_DEFINITION,
+  type OneBot11RuntimeConfig,
+} from './definition.js'
 import {
   OneBotActionError,
   OneBotWebSocketClient,
@@ -108,7 +114,7 @@ const actionOutcome = (error: unknown): AdapterInteractionOutcome => {
 
 /** Protocol-endpoint-neutral OneBot 11 mapping and optional interaction layer. */
 export class OneBot11Runtime implements AdapterConnectionRuntime {
-  readonly capabilities = ONEBOT_11_CAPABILITIES
+  readonly capabilities: AdapterRuntimeCapabilities
   readonly interactions: AdapterConnectionInteractions
   readonly #context: AdapterConnectionHostContext
   readonly #config: OneBot11RuntimeConfig
@@ -122,6 +128,21 @@ export class OneBot11Runtime implements AdapterConnectionRuntime {
     this.#context = options.context
     this.#config = options.config
     this.#transportOptions = options.transport ?? {}
+    this.capabilities = {
+      outbound: ONEBOT_11_CAPABILITIES,
+      activities: Object.fromEntries(
+        ONEBOT_11_CONNECTION_DEFINITION.descriptor.activities.map((activity) => [
+          activity.key,
+          activity.key === 'member-poked' && !options.config.capturePokeEvents
+            ? { state: 'disabled', reason: '连接未记录戳一戳事件。' }
+            : (activity.key === 'message-reaction-added' || activity.key === 'message-reaction-removed') &&
+                !options.config.captureMessageReactionEvents
+              ? { state: 'disabled', reason: '连接未记录普通消息回应。' }
+              : { state: 'available' },
+        ]),
+      ),
+      processingFeedback: { state: 'unknown' },
+    }
     this.interactions = {
       startProcessingFeedback: (input) => this.#setProcessingFeedback(input.channelId, input.platformMessageId, true),
       finishProcessingFeedback: (input) => this.#setProcessingFeedback(input.channelId, input.platformMessageId, false),
@@ -345,7 +366,7 @@ export class OneBot11Runtime implements AdapterConnectionRuntime {
     })
     const decoded = await this.#decodeMessage(event['message'], channelId)
     const mentionedBot = decoded.mentionedPlatformIds.includes(this.#requireClient().accountId ?? '')
-    await this.#context.acceptInbound({
+    await this.#context.acceptChannelInbound({
       connectionId: this.#context.connectionId,
       channelId,
       adapterKey: ONEBOT_11_ADAPTER_KEY,
@@ -585,56 +606,95 @@ export class OneBot11Runtime implements AdapterConnectionRuntime {
     const senderId = oneBotStringId(event['sender_id'])
     const targetId = oneBotStringId(event['target_id'])
     const messageId = oneBotStringId(event['message_id'])
-    let activityType: Parameters<AdapterConnectionHostContext['acceptInbound']>[0]['activityType']
-    let kind: Parameters<AdapterConnectionHostContext['acceptInbound']>[0]['kind'] = 'control'
+    let activityKey: Parameters<AdapterConnectionHostContext['acceptChannelInbound']>[0]['activityKey']
+    let kind: Parameters<AdapterConnectionHostContext['acceptChannelInbound']>[0]['kind'] = 'control'
     let reactionEmoji: string | undefined
     let reactionAdded = true
 
     if (noticeType === 'group_recall' || noticeType === 'friend_recall') {
       if (messageId && this.#isRecallEcho(messageId, userId, operatorId)) return
-      activityType = 'message-recalled'
+      activityKey = 'message-recalled'
       kind = 'message-deleted'
     } else if (noticeType === 'group_msg_emoji_like') {
       const likes = Array.isArray(event['likes']) ? oneBotObject(event['likes'][0]) : undefined
       reactionEmoji =
         oneBotStringId(event['emoji_id']) ?? oneBotStringId(event['emoji_type']) ?? oneBotStringId(likes?.['emoji_id'])
       reactionAdded = subType !== 'remove' && event['set'] !== false
-      activityType = reactionAdded ? 'message-reaction-added' : 'message-reaction-removed'
+      activityKey = reactionAdded ? 'message-reaction-added' : 'message-reaction-removed'
       kind = 'reaction'
       if (this.#isFeedbackEcho(messageId, reactionEmoji, reactionAdded, userId)) return
       if (!this.#config.captureMessageReactionEvents) return
     } else if (noticeType === 'notify' && subType === 'poke') {
       if (!this.#config.capturePokeEvents) return
-      activityType = 'member-poked'
+      activityKey = 'member-poked'
     } else if ((noticeType === 'notify' && subType === 'profile_like') || noticeType === 'profile_like') {
-      activityType = 'profile-liked'
+      activityKey = 'profile-liked'
     } else if (noticeType === 'group_increase') {
-      activityType = 'member-joined'
+      activityKey = 'member-joined'
       kind = 'member-updated'
     } else if (noticeType === 'group_decrease') {
-      activityType = 'member-left'
+      activityKey = 'member-left'
       kind = 'member-updated'
     } else if (noticeType === 'group_ban') {
-      activityType = subType === 'lift_ban' || numberValue(event['duration']) === 0 ? 'member-unmuted' : 'member-muted'
+      activityKey = subType === 'lift_ban' || numberValue(event['duration']) === 0 ? 'member-unmuted' : 'member-muted'
       kind = 'member-updated'
     } else if (noticeType === 'group_admin') {
-      activityType = subType === 'unset' ? 'member-admin-unset' : 'member-admin-set'
+      activityKey = subType === 'unset' ? 'member-admin-unset' : 'member-admin-set'
       kind = 'member-updated'
     } else if (noticeType === 'group_card') {
-      activityType = 'member-card-changed'
+      activityKey = 'member-card-changed'
       kind = 'member-updated'
     } else if (noticeType === 'notify' && subType === 'title') {
-      activityType = 'member-title-changed'
+      activityKey = 'member-title-changed'
       kind = 'member-updated'
     } else if (noticeType === 'notify' && (subType === 'group_name' || subType === 'group_name_change')) {
-      activityType = 'channel-name-changed'
+      activityKey = 'channel-name-changed'
     } else if (noticeType === 'group_upload') {
-      activityType = 'file-uploaded'
+      activityKey = 'file-uploaded'
     } else if (noticeType === 'essence') {
-      activityType = subType === 'delete' || subType === 'remove' ? 'essence-removed' : 'essence-added'
+      activityKey = subType === 'delete' || subType === 'remove' ? 'essence-removed' : 'essence-added'
     } else if (noticeType === 'friend_add') {
-      activityType = 'friend-added'
+      activityKey = 'friend-added'
     } else return
+
+    if (activityKey === 'profile-liked' || activityKey === 'friend-added') {
+      const actorPlatformId = activityKey === 'profile-liked' ? (operatorId ?? userId ?? senderId) : undefined
+      const subjectPlatformId = activityKey === 'friend-added' ? userId : undefined
+      if (activityKey === 'profile-liked' && actorPlatformId === undefined) return
+      if (activityKey === 'friend-added' && subjectPlatformId === undefined) return
+      const ensured = new Map<string, Awaited<ReturnType<AdapterConnectionHostContext['identities']['ensure']>>>()
+      const ensureIdentity = async (platformUserId: string | undefined) => {
+        if (platformUserId === undefined) return undefined
+        const existing = ensured.get(platformUserId)
+        if (existing) return existing
+        const identityId = await this.#context.identities.ensure({ platformUserId, observedAt: now })
+        ensured.set(platformUserId, identityId)
+        return identityId
+      }
+      const [actorIdentityId, subjectIdentityId] = await Promise.all([
+        ensureIdentity(actorPlatformId),
+        ensureIdentity(subjectPlatformId),
+      ])
+      const times = numberValue(event['times'])
+      await this.#context.acceptConnectionInbound({
+        connectionId: this.#context.connectionId,
+        adapterKey: ONEBOT_11_ADAPTER_KEY,
+        activityKey,
+        summary:
+          activityKey === 'profile-liked'
+            ? `一名用户为账号资料点了${times && times > 1 ? ` ${times} 次` : ''}赞。`
+            : '一名用户已成为该账号的好友。',
+        ...(actorIdentityId === undefined ? {} : { actorIdentityId }),
+        ...(subjectIdentityId === undefined ? {} : { subjectIdentityId }),
+        sourceTimestamp: timestampMs(event['time'], now),
+        receivedAt: now,
+        dedupeKey: `onebot:${eventDigest(event)}`,
+        ...(subType === undefined && times === undefined
+          ? {}
+          : { facts: { ...(subType === undefined ? {} : { subType }), ...(times === undefined ? {} : { times }) } }),
+      })
+      return
+    }
 
     const directPeerId = userId ?? operatorId ?? senderId
     const channelPlatformId = groupId ? `group:${groupId}` : directPeerId ? `private:${directPeerId}` : undefined
@@ -644,7 +704,7 @@ export class OneBot11Runtime implements AdapterConnectionRuntime {
       kind: groupId ? 'group' : 'direct',
       observedAt: now,
     })
-    if (activityType === 'channel-name-changed') {
+    if (activityKey === 'channel-name-changed') {
       const name =
         compactNoticeText(event['name_new']) ??
         compactNoticeText(event['group_name']) ??
@@ -706,7 +766,7 @@ export class OneBot11Runtime implements AdapterConnectionRuntime {
 
     let senderMemberId: ChannelMemberId | undefined
     let parts: MessagePart[]
-    if (activityType === 'message-recalled') {
+    if (activityKey === 'message-recalled') {
       const actorId = operatorId ?? userId
       senderMemberId = memberId(actorId)
       parts = sameMember(actorId, userId)
@@ -719,16 +779,16 @@ export class OneBot11Runtime implements AdapterConnectionRuntime {
               { type: 'text', text: ' 的一条消息。' },
             ]
           : [...memberParts(userId, '一名成员'), { type: 'text', text: ' 撤回了一条消息。' }]
-    } else if (activityType === 'message-reaction-added' || activityType === 'message-reaction-removed') {
+    } else if (activityKey === 'message-reaction-added' || activityKey === 'message-reaction-removed') {
       senderMemberId = memberId(userId)
       parts = [
         ...memberParts(userId, '一名成员'),
         {
           type: 'text',
-          text: activityType === 'message-reaction-added' ? ' 对一条消息添加了回应。' : ' 移除了一条消息的回应。',
+          text: activityKey === 'message-reaction-added' ? ' 对一条消息添加了回应。' : ' 移除了一条消息的回应。',
         },
       ]
-    } else if (activityType === 'member-poked') {
+    } else if (activityKey === 'member-poked') {
       const actorId = senderId ?? userId
       senderMemberId = memberId(actorId)
       parts = [
@@ -737,15 +797,7 @@ export class OneBot11Runtime implements AdapterConnectionRuntime {
         ...memberParts(targetId, '另一名成员'),
         { type: 'text', text: '。' },
       ]
-    } else if (activityType === 'profile-liked') {
-      senderMemberId = memberId(operatorId)
-      const times = numberValue(event['times'])
-      if (times !== undefined) facts['times'] = times
-      parts = [
-        ...memberParts(operatorId, '一名成员'),
-        { type: 'text', text: ` 为机器人账号资料卡点了${times && times > 1 ? ` ${times} 次` : ''}赞。` },
-      ]
-    } else if (activityType === 'member-joined') {
+    } else if (activityKey === 'member-joined') {
       senderMemberId = memberId(userId)
       parts =
         subType === 'invite' && operatorId && !sameMember(operatorId, userId)
@@ -758,7 +810,7 @@ export class OneBot11Runtime implements AdapterConnectionRuntime {
           : subType === 'approve'
             ? [...memberParts(userId, '一名成员'), { type: 'text', text: ' 通过申请加入了频道。' }]
             : [...memberParts(userId, '一名成员'), { type: 'text', text: ' 加入了频道。' }]
-    } else if (activityType === 'member-left') {
+    } else if (activityKey === 'member-left') {
       senderMemberId = memberId(subType === 'kick' || subType === 'kick_me' ? (operatorId ?? userId) : userId)
       parts =
         subType === 'disband'
@@ -773,7 +825,7 @@ export class OneBot11Runtime implements AdapterConnectionRuntime {
             : subType === 'kick' || subType === 'kick_me'
               ? [...memberParts(userId, '一名成员'), { type: 'text', text: ' 被移出了频道。' }]
               : [...memberParts(userId, '一名成员'), { type: 'text', text: ' 离开了频道。' }]
-    } else if (activityType === 'member-muted' || activityType === 'member-unmuted') {
+    } else if (activityKey === 'member-muted' || activityKey === 'member-unmuted') {
       senderMemberId = operatorMemberId ?? subjectMemberId
       const prefix = operatorId
         ? [...memberParts(operatorId, '一名管理员'), { type: 'text' as const, text: ' 将 ' }]
@@ -785,21 +837,21 @@ export class OneBot11Runtime implements AdapterConnectionRuntime {
         {
           type: 'text',
           text:
-            activityType === 'member-muted'
+            activityKey === 'member-muted'
               ? `${operatorId ? '' : ' 被'}禁言${duration ? ` ${duration}` : ''}。`
               : `${operatorId ? '' : ' 被'}解除了禁言。`,
         },
       ]
-    } else if (activityType === 'member-admin-set' || activityType === 'member-admin-unset') {
+    } else if (activityKey === 'member-admin-set' || activityKey === 'member-admin-unset') {
       senderMemberId = subjectMemberId
       parts = [
         ...memberParts(userId, '一名成员'),
         {
           type: 'text',
-          text: activityType === 'member-admin-set' ? ' 被设为管理员。' : ' 不再担任管理员。',
+          text: activityKey === 'member-admin-set' ? ' 被设为管理员。' : ' 不再担任管理员。',
         },
       ]
-    } else if (activityType === 'member-card-changed') {
+    } else if (activityKey === 'member-card-changed') {
       senderMemberId = subjectMemberId
       parts =
         previousValue && cardNew
@@ -812,13 +864,13 @@ export class OneBot11Runtime implements AdapterConnectionRuntime {
             : previousValue
               ? [...memberParts(userId, '一名成员'), { type: 'text', text: ` 清除了群名片「${previousValue}」。` }]
               : [...memberParts(userId, '一名成员'), { type: 'text', text: ' 修改了群名片。' }]
-    } else if (activityType === 'member-title-changed') {
+    } else if (activityKey === 'member-title-changed') {
       senderMemberId = subjectMemberId
       const title = compactNoticeText(event['title'])
       parts = title
         ? [...memberParts(userId, '一名成员'), { type: 'text', text: ` 获得了群头衔「${title}」。` }]
         : [...memberParts(userId, '一名成员'), { type: 'text', text: ' 的群头衔发生了变化。' }]
-    } else if (activityType === 'channel-name-changed') {
+    } else if (activityKey === 'channel-name-changed') {
       senderMemberId = subjectMemberId
       const name =
         compactNoticeText(event['name_new']) ??
@@ -827,7 +879,7 @@ export class OneBot11Runtime implements AdapterConnectionRuntime {
       parts = name
         ? [...memberParts(userId, '一名管理员'), { type: 'text', text: ` 将频道名称改为「${name}」。` }]
         : [{ type: 'text', text: '频道名称发生了变化。' }]
-    } else if (activityType === 'essence-added' || activityType === 'essence-removed') {
+    } else if (activityKey === 'essence-added' || activityKey === 'essence-removed') {
       senderMemberId = operatorMemberId ?? subjectMemberId
       parts = [
         ...memberParts(operatorId ?? userId, '一名管理员'),
@@ -835,19 +887,16 @@ export class OneBot11Runtime implements AdapterConnectionRuntime {
         ...memberParts(userId, '一名成员'),
         {
           type: 'text',
-          text: activityType === 'essence-added' ? ' 的一条消息设为精华。' : ' 的一条消息取消了精华。',
+          text: activityKey === 'essence-added' ? ' 的一条消息设为精华。' : ' 的一条消息取消了精华。',
         },
       ]
-    } else if (activityType === 'friend-added') {
-      senderMemberId = subjectMemberId
-      parts = [...memberParts(userId, '一名成员'), { type: 'text', text: ' 已成为机器人账号的好友。' }]
     } else {
       senderMemberId = subjectMemberId
       parts = [{ type: 'text', text: '收到一条频道事件。' }]
     }
 
     let assetOccurrences: { readonly partIndex: number; readonly assetId: AssetId }[] | undefined
-    if (activityType === 'file-uploaded' && groupId) {
+    if (activityKey === 'file-uploaded' && groupId) {
       const file = oneBotObject(event['file'])
       const fileId = oneBotStringId(file?.['id'])
       const busid = oneBotStringId(file?.['busid'])
@@ -883,12 +932,12 @@ export class OneBot11Runtime implements AdapterConnectionRuntime {
         parts = [...memberParts(userId, '一名成员'), { type: 'text', text: ` 上传了${detail}。` }]
       }
     }
-    await this.#context.acceptInbound({
+    await this.#context.acceptChannelInbound({
       connectionId: this.#context.connectionId,
       channelId,
       adapterKey: ONEBOT_11_ADAPTER_KEY,
       kind,
-      activityType,
+      activityKey,
       ...(messageId === undefined ? {} : { targetPlatformMessageId: messageId }),
       ...(senderMemberId === undefined ? {} : { senderMemberId }),
       parts,

@@ -55,13 +55,13 @@ const channel = (bound: boolean): ChannelSummary => ({
   id: ChannelIdSchema.parse('chn_workbench'),
   connectionId: ConnectionIdSchema.parse('con_workbench'),
   name: '内置频道',
-  kind: 'web',
+  kind: 'internal',
   connectionName: '内置频道',
   agentId: bound ? agentId : '',
   trigger: '始终响应',
   runtimePhase: '空闲',
   bindings: bound
-    ? [{ id: 'binding', agentId, triggerPolicy: 'always', processingFeedback: 'auto', eventTriggers: [] }]
+    ? [{ id: 'binding', agentId, triggerPolicy: 'always', processingFeedback: 'auto', activityTriggerOverrides: {} }]
     : [],
   unread: 0,
 })

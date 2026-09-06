@@ -1,23 +1,27 @@
 import type {
   AssetId,
+  AdapterActivityKey,
   ChannelEventId,
-  ChannelActivityType,
   ChannelId,
   ChannelMemberId,
   ConnectionId,
+  ConnectionEventId,
+  HostIconName,
   JsonValue,
   LogicalMessageId,
   MessagePart,
   PhysicalDeliveryId,
+  PlatformIdentityId,
 } from '@nekro-nxt/contracts'
 import {
   AssetIdSchema,
-  ChannelActivityTypeSchema,
+  AdapterActivityKeySchema,
   ChannelIdSchema,
   ChannelMemberIdSchema,
   ConnectionIdSchema,
   LogicalMessageIdSchema,
   MessagePartSchema,
+  PlatformIdentityIdSchema,
 } from '@nekro-nxt/contracts'
 import { z } from 'zod'
 
@@ -39,13 +43,13 @@ export const AdapterOutboundCapabilitiesSchema = z
 
 export type AdapterOutboundCapabilities = z.infer<typeof AdapterOutboundCapabilitiesSchema>
 
-export type AdapterInboundEventKind =
+export type AdapterChannelInboundEventKind =
   'message-created' | 'message-edited' | 'message-deleted' | 'member-updated' | 'reaction' | 'control'
 
-export { ChannelActivityTypeSchema }
-export type { ChannelActivityType }
+export { AdapterActivityKeySchema }
+export type { AdapterActivityKey }
 
-export const AdapterInboundEventSchema = z
+export const AdapterChannelInboundEventSchema = z
   .object({
     connectionId: ConnectionIdSchema,
     channelId: ChannelIdSchema,
@@ -53,7 +57,7 @@ export const AdapterInboundEventSchema = z
     platformEventId: z.string().min(1).optional(),
     platformMessageId: z.string().min(1).optional(),
     kind: z.enum(['message-created', 'message-edited', 'message-deleted', 'member-updated', 'reaction', 'control']),
-    activityType: ChannelActivityTypeSchema.optional(),
+    activityKey: AdapterActivityKeySchema.optional(),
     targetPlatformMessageId: z.string().min(1).optional(),
     targetLogicalMessageId: LogicalMessageIdSchema.optional(),
     senderMemberId: ChannelMemberIdSchema.optional(),
@@ -69,18 +73,43 @@ export const AdapterInboundEventSchema = z
   })
   .strict()
 
-export type AdapterInboundEvent = z.infer<typeof AdapterInboundEventSchema>
+export type AdapterChannelInboundEvent = z.infer<typeof AdapterChannelInboundEventSchema>
+
+export const AdapterConnectionInboundEventSchema = z
+  .object({
+    connectionId: ConnectionIdSchema,
+    adapterKey: z.string().trim().min(1),
+    platformEventId: z.string().min(1).optional(),
+    activityKey: AdapterActivityKeySchema,
+    summary: z.string().trim().min(1).max(2_000),
+    actorIdentityId: PlatformIdentityIdSchema.optional(),
+    subjectIdentityId: PlatformIdentityIdSchema.optional(),
+    sourceTimestamp: z.number().int().safe().nonnegative(),
+    receivedAt: z.number().int().safe().nonnegative(),
+    dedupeKey: z.string().trim().min(1),
+    facts: z.record(z.string(), z.json()).optional(),
+  })
+  .strict()
+
+export type AdapterConnectionInboundEvent = z.infer<typeof AdapterConnectionInboundEventSchema>
 
 export interface InboundCommitResult {
   readonly channelEventId: ChannelEventId
   readonly inserted: boolean
 }
 
+export interface ConnectionInboundCommitResult {
+  readonly connectionEventId: ConnectionEventId
+  readonly inserted: boolean
+}
+
 export interface AdapterConnectionContext {
   readonly connectionId: ConnectionId
-  readonly acceptInbound: (event: AdapterInboundEvent) => Promise<InboundCommitResult>
+  readonly acceptChannelInbound: (event: AdapterChannelInboundEvent) => Promise<InboundCommitResult>
+  readonly acceptConnectionInbound?: (event: AdapterConnectionInboundEvent) => Promise<ConnectionInboundCommitResult>
   readonly now: () => number
   readonly channels?: AdapterChannelDirectory
+  readonly identities?: AdapterIdentityDirectory
   readonly members?: AdapterMemberDirectory
   readonly messages?: AdapterMessageDirectory
   readonly assets?: AdapterAssetHost
@@ -94,9 +123,26 @@ export type AdapterConnectionHostContext = AdapterConnectionContext &
   Required<
     Pick<
       AdapterConnectionContext,
-      'channels' | 'members' | 'messages' | 'assets' | 'credentials' | 'state' | 'diagnostics' | 'transport'
+      | 'acceptConnectionInbound'
+      | 'channels'
+      | 'identities'
+      | 'members'
+      | 'messages'
+      | 'assets'
+      | 'credentials'
+      | 'state'
+      | 'diagnostics'
+      | 'transport'
     >
   >
+
+export interface AdapterIdentityDirectory {
+  ensure(input: {
+    readonly platformUserId: string
+    readonly displayName?: string
+    readonly observedAt: number
+  }): Promise<PlatformIdentityId>
+}
 
 /** Restricted Host-owned channel directory. It never exposes Core repositories. */
 export interface AdapterChannelDirectory {
@@ -210,7 +256,7 @@ export interface AdapterConnectionDiagnostic {
   readonly message?: string
   readonly credentialConfigured?: boolean
   readonly proactiveSend?: boolean
-  readonly accountId?: string
+  readonly accountReference?: string
   readonly implementation?: {
     readonly name?: string
     readonly version?: string
@@ -319,6 +365,30 @@ export type AdapterConnectionUiSchema<
 }
 
 /** Product-facing, versioned Connection setup metadata contributed by an Adapter. */
+export type AdapterChannelKind = 'internal' | 'direct' | 'group'
+
+export interface AdapterActivityDefinition {
+  readonly key: AdapterActivityKey
+  readonly scope: 'channel' | 'connection'
+  readonly displayName: string
+  readonly description: string
+  readonly icon?: HostIconName
+  readonly triggerable: boolean
+  readonly channelKinds?: readonly AdapterChannelKind[]
+}
+
+export interface AdapterCapabilityState {
+  readonly state: 'available' | 'disabled' | 'unsupported' | 'degraded' | 'unknown'
+  readonly reason?: string
+}
+
+export const AdapterCapabilityStateSchema = z
+  .object({
+    state: z.enum(['available', 'disabled', 'unsupported', 'degraded', 'unknown']),
+    reason: z.string().trim().min(1).optional(),
+  })
+  .strict()
+
 export type AdapterConnectionDescriptor<
   ConfigurationSchema extends AdapterSchemaObject = never,
   CredentialsSchema extends AdapterSchemaObject = never,
@@ -326,12 +396,18 @@ export type AdapterConnectionDescriptor<
   readonly key: string
   readonly displayName: string
   readonly description: string
-  /** System-managed adapters remain visible for diagnostics but cannot be created by users. */
-  readonly userCreatable: boolean
+  readonly provisioning: 'user-created' | 'system-singleton'
   /** Whether the user can edit the optional Connection alias. */
   readonly aliasEditable: boolean
   /** How Channels become available for this Connection. */
   readonly channelDiscovery: 'host-created' | 'adapter-observed'
+  readonly channelKinds: readonly AdapterChannelKind[]
+  readonly activities: readonly AdapterActivityDefinition[]
+  readonly features: {
+    readonly processingFeedback?: {
+      readonly channelKinds: readonly Extract<AdapterChannelKind, 'direct' | 'group'>[]
+    }
+  }
   /** Product-owned diagnostic actions supported by this Adapter. */
   readonly diagnostics: {
     readonly receive: boolean
@@ -370,9 +446,12 @@ export function defineAdapterConnection<
   readonly key: Key
   readonly displayName: string
   readonly description: string
-  readonly userCreatable: boolean
+  readonly provisioning: 'user-created' | 'system-singleton'
   readonly aliasEditable?: boolean
   readonly channelDiscovery?: 'host-created' | 'adapter-observed'
+  readonly channelKinds: readonly AdapterChannelKind[]
+  readonly activities?: readonly AdapterActivityDefinition[]
+  readonly features?: AdapterConnectionDescriptor['features']
   readonly diagnostics?: { readonly receive: boolean; readonly send: boolean }
   readonly configurationSchema: ConfigurationSchema
   readonly credentialsSchema: CredentialsSchema
@@ -384,10 +463,17 @@ export function defineAdapterConnection<
       key: input.key,
       displayName: input.displayName,
       description: input.description,
-      userCreatable: input.userCreatable,
-      aliasEditable: input.aliasEditable ?? input.userCreatable,
-      channelDiscovery: input.channelDiscovery ?? (input.userCreatable ? 'adapter-observed' : 'host-created'),
-      diagnostics: input.diagnostics ?? { receive: input.userCreatable, send: input.userCreatable },
+      provisioning: input.provisioning,
+      aliasEditable: input.aliasEditable ?? input.provisioning === 'user-created',
+      channelDiscovery:
+        input.channelDiscovery ?? (input.provisioning === 'user-created' ? 'adapter-observed' : 'host-created'),
+      channelKinds: input.channelKinds,
+      activities: input.activities ?? [],
+      features: input.features ?? {},
+      diagnostics: input.diagnostics ?? {
+        receive: input.provisioning === 'user-created',
+        send: input.provisioning === 'user-created',
+      },
       configSchema: input.configSchema,
     },
     configurationSchema: input.configurationSchema,
@@ -498,9 +584,35 @@ export const AdapterDeliveryReceiptSchema = z.discriminatedUnion('status', [
 
 export type AdapterDeliveryReceipt = z.infer<typeof AdapterDeliveryReceiptSchema>
 
+export interface AdapterRuntimeCapabilities {
+  readonly outbound: AdapterOutboundCapabilities
+  readonly activities: Readonly<Record<AdapterActivityKey, AdapterCapabilityState>>
+  readonly processingFeedback?: AdapterCapabilityState
+}
+
+export const AdapterRuntimeCapabilitiesSchema = z
+  .object({
+    outbound: AdapterOutboundCapabilitiesSchema,
+    activities: z.record(AdapterActivityKeySchema, AdapterCapabilityStateSchema),
+    processingFeedback: AdapterCapabilityStateSchema.optional(),
+  })
+  .strict()
+
+export interface AdapterLocalChannelPort {
+  postMessage(input: {
+    readonly channelId: ChannelId
+    readonly clientEventId: string
+    readonly senderMemberId?: ChannelMemberId
+    readonly parts: readonly MessagePart[]
+    readonly replyToBot?: boolean
+    readonly receivedAt?: number
+  }): Promise<InboundCommitResult>
+}
+
 export interface AdapterConnectionRuntime {
-  readonly capabilities: AdapterOutboundCapabilities
+  readonly capabilities: AdapterRuntimeCapabilities
   readonly interactions?: AdapterConnectionInteractions
+  readonly localChannel?: AdapterLocalChannelPort
   /** Platform-aware, side-effect-free split before PhysicalDelivery facts are committed. */
   planOutbound?(input: {
     readonly connectionId: ConnectionId
@@ -509,7 +621,7 @@ export interface AdapterConnectionRuntime {
     readonly replyTo?: string
     readonly origin?: {
       readonly platformMessageId?: string
-      readonly activityType?: ChannelActivityType
+      readonly activityKey?: AdapterActivityKey
       readonly receivedAt: number
     }
     readonly processingFeedback?: {
@@ -569,8 +681,8 @@ export interface AdapterStoredConnectionConfiguration {
 }
 
 /** Versioned Host-wide Adapter contribution loaded from built-ins or an installed Extension Revision. */
-export interface AdapterHostContributionV1 {
-  readonly apiVersion: 1
+export interface AdapterHostContributionV2 {
+  readonly apiVersion: 2
   readonly descriptor: AdapterConnectionDescriptor
   create(
     context: AdapterConnectionHostContext,
@@ -580,7 +692,7 @@ export interface AdapterHostContributionV1 {
 
 export interface RegisteredAdapterHandle {
   readonly owner: string
-  readonly contribution: AdapterHostContributionV1
+  readonly contribution: AdapterHostContributionV2
   dispose(): Promise<void>
 }
 
@@ -590,6 +702,59 @@ const assertAdapterDescriptor = (descriptor: AdapterConnectionDescriptor): void 
     throw new TypeError('Adapter key must use lowercase letters, numbers, and hyphens.')
   }
   if (!descriptor.displayName.trim()) throw new TypeError('Adapter displayName must not be empty.')
+  if (descriptor.provisioning !== 'user-created' && descriptor.provisioning !== 'system-singleton') {
+    throw new TypeError('Adapter provisioning is invalid.')
+  }
+  if (descriptor.provisioning === 'system-singleton' && descriptor.aliasEditable) {
+    throw new TypeError('System-singleton Adapter alias cannot be editable.')
+  }
+  if (descriptor.channelKinds.length === 0) throw new TypeError('Adapter must declare at least one Channel kind.')
+  if (descriptor.channelKinds.some((kind) => kind !== 'internal' && kind !== 'direct' && kind !== 'group')) {
+    throw new TypeError('Adapter declared an invalid Channel kind.')
+  }
+  const channelKinds = new Set(descriptor.channelKinds)
+  if (channelKinds.size !== descriptor.channelKinds.length) {
+    throw new TypeError('Adapter Channel kinds must not contain duplicates.')
+  }
+  const activityKeys = new Set<string>()
+  for (const activity of descriptor.activities) {
+    AdapterActivityKeySchema.parse(activity.key)
+    if (activityKeys.has(activity.key)) throw new TypeError(`Adapter activity key is duplicated: ${activity.key}`)
+    activityKeys.add(activity.key)
+    if (!activity.displayName.trim() || !activity.description.trim()) {
+      throw new TypeError(`Adapter activity requires displayName and description: ${activity.key}`)
+    }
+    if (activity.scope !== 'channel' && activity.scope !== 'connection') {
+      throw new TypeError(`Adapter activity scope is invalid: ${activity.key}`)
+    }
+    if (typeof activity.triggerable !== 'boolean') {
+      throw new TypeError(`Adapter activity triggerable flag is invalid: ${activity.key}`)
+    }
+    if (activity.scope === 'connection') {
+      if (activity.triggerable)
+        throw new TypeError(`Connection activity cannot trigger an intelligent agent: ${activity.key}`)
+      if (activity.channelKinds !== undefined) {
+        throw new TypeError(`Connection activity cannot declare Channel kinds: ${activity.key}`)
+      }
+      continue
+    }
+    if (!activity.channelKinds || activity.channelKinds.length === 0) {
+      throw new TypeError(`Channel activity must declare Channel kinds: ${activity.key}`)
+    }
+    if (new Set(activity.channelKinds).size !== activity.channelKinds.length) {
+      throw new TypeError(`Channel activity kinds must not contain duplicates: ${activity.key}`)
+    }
+    if (activity.channelKinds.some((kind) => !channelKinds.has(kind))) {
+      throw new TypeError(`Channel activity uses an unsupported Channel kind: ${activity.key}`)
+    }
+  }
+  const feedbackKinds = descriptor.features.processingFeedback?.channelKinds ?? []
+  if (new Set(feedbackKinds).size !== feedbackKinds.length) {
+    throw new TypeError('Processing feedback Channel kinds must not contain duplicates.')
+  }
+  if (feedbackKinds.some((kind) => !channelKinds.has(kind))) {
+    throw new TypeError('Processing feedback uses an unsupported Channel kind.')
+  }
   if (descriptor.configSchema.type !== 'object') throw new TypeError('Adapter config schema must be an object.')
   if (!Number.isSafeInteger(descriptor.configSchema.schemaVersion) || descriptor.configSchema.schemaVersion < 1) {
     throw new TypeError('Adapter config schema version must be a positive integer.')
@@ -625,10 +790,10 @@ export class AdapterRegistry {
   readonly #byKey = new Map<string, RegisteredAdapterHandle>()
   readonly #byOwner = new Map<string, RegisteredAdapterHandle>()
 
-  register(ownerInput: string, contribution: AdapterHostContributionV1): RegisteredAdapterHandle {
+  register(ownerInput: string, contribution: AdapterHostContributionV2): RegisteredAdapterHandle {
     const owner = ownerInput.trim()
     if (!owner) throw new TypeError('Adapter contribution owner must not be empty.')
-    if (contribution.apiVersion !== 1)
+    if (contribution.apiVersion !== 2)
       throw new TypeError(`Unsupported Adapter Host API version: ${String(contribution.apiVersion)}`)
     assertAdapterDescriptor(contribution.descriptor)
     if (this.#byOwner.has(owner)) throw new Error(`Adapter contribution owner is already registered: ${owner}`)
@@ -652,25 +817,46 @@ export class AdapterRegistry {
     return handle
   }
 
-  get(key: string): AdapterHostContributionV1 | undefined {
+  get(key: string): AdapterHostContributionV2 | undefined {
     return this.#byKey.get(key)?.contribution
   }
 
-  getByOwner(owner: string): AdapterHostContributionV1 | undefined {
+  getByOwner(owner: string): AdapterHostContributionV2 | undefined {
     return this.#byOwner.get(owner)?.contribution
   }
 
-  list(): readonly AdapterHostContributionV1[] {
+  list(): readonly AdapterHostContributionV2[] {
     return [...this.#byKey.values()].map(({ contribution }) => contribution)
   }
 }
 
-export function parseAdapterInboundEvent(input: unknown): AdapterInboundEvent {
-  return AdapterInboundEventSchema.parse(input)
+export function parseAdapterChannelInboundEvent(input: unknown): AdapterChannelInboundEvent {
+  return AdapterChannelInboundEventSchema.parse(input)
 }
 
-export function parseAdapterCapabilities(input: unknown): AdapterOutboundCapabilities {
-  return AdapterOutboundCapabilitiesSchema.parse(input)
+export function parseAdapterConnectionInboundEvent(input: unknown): AdapterConnectionInboundEvent {
+  return AdapterConnectionInboundEventSchema.parse(input)
+}
+
+export function parseAdapterCapabilities(input: unknown): AdapterRuntimeCapabilities {
+  const parsed = AdapterRuntimeCapabilitiesSchema.parse(input)
+  return {
+    outbound: parsed.outbound,
+    activities: Object.fromEntries(
+      Object.entries(parsed.activities).map(([key, value]) => [
+        key,
+        { state: value.state, ...(value.reason === undefined ? {} : { reason: value.reason }) },
+      ]),
+    ),
+    ...(parsed.processingFeedback === undefined
+      ? {}
+      : {
+          processingFeedback: {
+            state: parsed.processingFeedback.state,
+            ...(parsed.processingFeedback.reason === undefined ? {} : { reason: parsed.processingFeedback.reason }),
+          },
+        }),
+  }
 }
 
 export function parseAdapterDeliveryReceipt(input: unknown): AdapterDeliveryReceipt {

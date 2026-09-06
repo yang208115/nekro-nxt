@@ -2,7 +2,7 @@ export * from './definition.js'
 export * from './runtime.js'
 export * from './transport.js'
 
-import type { AdapterHostContributionV1 } from '@nekro-nxt/adapter-sdk'
+import type { AdapterHostContributionV2 } from '@nekro-nxt/adapter-sdk'
 import {
   WECOM_AI_BOT_CONNECTION_DEFINITION,
   WeComAiBotConnectionConfigurationSchema,
@@ -12,8 +12,8 @@ import { WeComAiBotRuntime, type WeComAiBotRuntimeOptions } from './runtime.js'
 
 export const createWeComAiBotHostContribution = (
   transport?: WeComAiBotRuntimeOptions['transport'],
-): AdapterHostContributionV1 => ({
-  apiVersion: 1,
+): AdapterHostContributionV2 => ({
+  apiVersion: 2,
   descriptor: WECOM_AI_BOT_CONNECTION_DEFINITION.descriptor,
   create: (context, stored) =>
     Promise.resolve(

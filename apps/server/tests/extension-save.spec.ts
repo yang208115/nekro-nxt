@@ -59,8 +59,8 @@ describe('NekroNxt domain API — save a running dynamic Package as a local Exte
     })
     await runtime.start()
 
-    // Create an intelligent-agent with dynamic creation + its default Web Channel.
-    const entity = await runtime.createAgentWithWebChannel({
+    // Create an intelligent-agent with dynamic creation and its default internal Channel.
+    const entity = await runtime.createAgentWithInternalChannel({
       displayName: '创造智能体',
       persona: '',
       model: { provider: 'test-provider', model: 'chat-model' },
@@ -69,7 +69,7 @@ describe('NekroNxt domain API — save a running dynamic Package as a local Exte
 
     // Admit one message so an active Episode + DSH Session is formed and the
     // dynamic-creation tools mount for this Agent.
-    await runtime.web.postMessage({
+    await runtime.internalChannel.postMessage({
       channelId: entity.channelId,
       clientEventId: 'seed-session',
       parts: [{ type: 'text', text: '建立活动会话。' }],

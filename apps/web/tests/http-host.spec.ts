@@ -7,11 +7,13 @@ import {
   ChannelIdSchema,
   ChannelMemberIdSchema,
   ConnectionIdSchema,
+  ConnectionEventIdSchema,
   EpisodeIdSchema,
   ExtensionIdSchema,
   ExtensionRevisionIdSchema,
   HostApiContracts,
   OutboundIntentIdSchema,
+  PlatformIdentityIdSchema,
 } from '@nekro-nxt/contracts'
 import { HttpProductHost, renderConversationBody } from '../src/http-host.ts'
 import { connectionDisplayName } from '../src/product-store.ts'
@@ -63,9 +65,9 @@ const webAgentRevisionId = AgentRevisionIdSchema.parse('arev_webagent')
 const nextAgentRevisionId = AgentRevisionIdSchema.parse('arev_nextagent')
 const webChannelId = ChannelIdSchema.parse('chn_webchannel')
 const createdChannelId = ChannelIdSchema.parse('chn_createdchannel')
-const qqChannelId = ChannelIdSchema.parse('chn_qqchannel')
-const webConnectionId = ConnectionIdSchema.parse('con_webconnection')
-const qqConnectionId = ConnectionIdSchema.parse('con_qqconnection')
+const externalChannelId = ChannelIdSchema.parse('chn_externalchannel')
+const internalConnectionId = ConnectionIdSchema.parse('con_internalconnection')
+const externalConnectionId = ConnectionIdSchema.parse('con_externalconnection')
 const secretConnectionId = ConnectionIdSchema.parse('con_secretconnection')
 const summaryExtensionId = ExtensionIdSchema.parse('ext_channelsummary')
 const savedExtensionId = ExtensionIdSchema.parse('ext_savedprobe')
@@ -98,20 +100,26 @@ const snapshotBody = () =>
     },
     connectionAdapters: [
       {
-        key: 'web',
+        key: 'fixture-alpha',
         displayName: '内置频道',
         description: '系统托管',
-        userCreatable: false,
+        provisioning: 'system-singleton',
+        channelKinds: ['internal'],
+        activities: [],
+        features: {},
         aliasEditable: false,
         channelDiscovery: 'host-created',
         diagnostics: { receive: false, send: false },
         configSchema: { schemaVersion: 1, type: 'object', required: [], properties: {} },
       },
       {
-        key: 'qq-openclaw',
-        displayName: 'QQ 官方机器人',
-        description: '连接 QQ 官方机器人账号',
-        userCreatable: true,
+        key: 'fixture-beta',
+        displayName: '示例群聊平台',
+        description: '连接示例群聊平台账号',
+        provisioning: 'user-created',
+        channelKinds: ['direct', 'group'],
+        activities: [],
+        features: {},
         aliasEditable: true,
         channelDiscovery: 'adapter-observed',
         diagnostics: { receive: true, send: true },
@@ -180,9 +188,9 @@ const snapshotBody = () =>
     channels: [
       {
         id: webChannelId,
-        connectionId: webConnectionId,
-        platformChannelId: 'web-agent-1',
-        kind: 'web',
+        connectionId: internalConnectionId,
+        platformChannelId: 'internal-agent-1',
+        kind: 'internal',
         displayName: '小奈的内置频道',
         boundAgentId: webAgentId,
         bindings: [
@@ -209,14 +217,11 @@ const snapshotBody = () =>
     ],
     connections: [
       {
-        id: webConnectionId,
-        adapterKey: 'web',
-        appId: '',
-        proactiveSend: false,
-        credentialConfigured: true,
+        id: internalConnectionId,
+        adapterKey: 'fixture-alpha',
+        status: { state: 'connected', proactiveSend: false, credentialConfigured: true, activities: {} },
         channelCount: 1,
         knownChannels: [],
-        gateway: { state: 'connected' },
       },
     ],
     extensions: [],
@@ -348,7 +353,7 @@ describe('HttpProductHost', () => {
     expect(snapshot.channels[0]).toMatchObject({
       id: webChannelId,
       name: '小奈的内置频道',
-      kind: 'web',
+      kind: 'internal',
       connectionName: '内置频道',
       agentId: webAgentId,
       trigger: '始终响应',
@@ -362,23 +367,23 @@ describe('HttpProductHost', () => {
       delivery: '已发送',
     })
     expect(snapshot.connections[0]).toMatchObject({
-      id: webConnectionId,
+      id: internalConnectionId,
       adapter: '内置频道',
-      adapterKey: 'web',
+      adapterKey: 'fixture-alpha',
       state: '已连接',
     })
     expect(listener).toHaveBeenCalledTimes(1)
     unsubscribe()
   })
 
-  it('shows external group senders and Mention names without leaking member IDs or QQ markup', async () => {
+  it('shows external group senders and Mention names without leaking member IDs or protocol markup', async () => {
     const base = snapshotBody()
     const body = {
       ...base,
       channels: [
         {
           ...base.channels[0]!,
-          connectionId: qqConnectionId,
+          connectionId: externalConnectionId,
           platformChannelId: 'group:opaque-platform-id',
           kind: 'group',
           displayName: '研发群',
@@ -393,7 +398,7 @@ describe('HttpProductHost', () => {
           mentionedConnectionAccount: true,
           parts: [
             { type: 'mention', memberId: ChannelMemberIdSchema.parse('mbr_bot'), displayName: '机器人账号' },
-            { type: 'text', text: '<faceType=6,faceId="0",ext="encoded"> 请看' },
+            { type: 'text', text: '[表情] 请看' },
             { type: 'mention', memberId: targetMemberId, displayName: '成员乙' },
           ],
           occurredAt: 1_700_000_000_000,
@@ -401,15 +406,18 @@ describe('HttpProductHost', () => {
       ],
       connections: [
         {
-          id: qqConnectionId,
-          adapterKey: 'qq-openclaw',
+          id: externalConnectionId,
+          adapterKey: 'fixture-beta',
           alias: '项目机器人',
-          appId: '12345678',
-          proactiveSend: false,
-          credentialConfigured: true,
+          status: {
+            state: 'connected',
+            proactiveSend: false,
+            credentialConfigured: true,
+            accountReference: '12345678',
+            activities: {},
+          },
           channelCount: 1,
           knownChannels: [{ id: webChannelId, name: 'group:opaque-platform-id', kind: 'group' }],
-          gateway: { state: 'connected' },
         },
       ],
     }
@@ -449,7 +457,7 @@ describe('HttpProductHost', () => {
           channelId: webChannelId,
           role: 'system',
           sender: { memberId: senderMemberId, displayName: '成员甲' },
-          activityType: 'member-joined',
+          activityKey: 'member-joined',
           parts: [
             { type: 'mention', memberId: senderMemberId, displayName: '新成员' },
             { type: 'text', text: ' 受 ' },
@@ -476,7 +484,7 @@ describe('HttpProductHost', () => {
 
     expect(host.getSnapshot().messages[0]).toMatchObject({
       role: 'system',
-      activityType: 'member-joined',
+      activityKey: 'member-joined',
       author: '频道事件',
       body: '@新成员 受 @邀请人 邀请加入了频道。',
       parts: [
@@ -636,7 +644,11 @@ describe('HttpProductHost', () => {
       requests.push({ url: input, ...(init === undefined ? {} : { init }) })
       if (input === '/api/agents' && init?.method === 'POST') {
         return Promise.resolve(
-          stubResponse(201, { agentId: createdAgentId, channelId: createdChannelId, connectionId: webConnectionId }),
+          stubResponse(201, {
+            agentId: createdAgentId,
+            channelId: createdChannelId,
+            connectionId: internalConnectionId,
+          }),
         )
       }
       if (input === '/api/snapshot') return Promise.resolve(stubResponse(200, snapshotBody()))
@@ -653,7 +665,11 @@ describe('HttpProductHost', () => {
       displayName: '资料员',
       model: { provider: 'test-provider', model: 'chat-model' },
     })
-    expect(result).toEqual({ agentId: createdAgentId, channelId: createdChannelId, connectionId: webConnectionId })
+    expect(result).toEqual({
+      agentId: createdAgentId,
+      channelId: createdChannelId,
+      connectionId: internalConnectionId,
+    })
 
     const createCall = requests.find((request) => request.url === '/api/agents')
     expect(createCall).toBeDefined()
@@ -857,10 +873,10 @@ describe('HttpProductHost', () => {
       requests.push({ url: input, ...(init === undefined ? {} : { init }) })
       if (input === '/api/snapshot') return Promise.resolve(stubResponse(200, snapshotBody()))
       if (input === '/api/connections' && init?.method === 'POST') {
-        return Promise.resolve(stubResponse(201, { connectionId: qqConnectionId, adapterKey: 'qq-openclaw' }))
+        return Promise.resolve(stubResponse(201, { connectionId: externalConnectionId, adapterKey: 'fixture-beta' }))
       }
-      if (input === `/api/connections/${qqConnectionId}/alias` && init?.method === 'POST') {
-        return Promise.resolve(stubResponse(200, { connectionId: qqConnectionId, alias: '新主群机器人' }))
+      if (input === `/api/connections/${externalConnectionId}/alias` && init?.method === 'POST') {
+        return Promise.resolve(stubResponse(200, { connectionId: externalConnectionId, alias: '新主群机器人' }))
       }
       return Promise.resolve(stubResponse(404, { error: { code: 'not-found', message: 'x' } }))
     })
@@ -872,24 +888,24 @@ describe('HttpProductHost', () => {
     await flush()
 
     await host.execute('connections.create', {
-      adapterKey: 'qq-openclaw',
+      adapterKey: 'fixture-beta',
       alias: '主群机器人',
       configuration: { appId: 'app-1', proactiveSend: true },
-      credentials: { clientSecretCredentialRef: 'secret-qq-1' },
+      credentials: { clientSecretCredentialRef: 'secret-fixture-1' },
     })
     const createCall = requests.find((request) => request.url === '/api/connections' && request.init?.method === 'POST')
     expect(createCall?.init?.method).toBe('POST')
     const createBody = createCall?.init?.body
     if (typeof createBody !== 'string') throw new TypeError('connection request body must be JSON text.')
     expect(HostApiContracts.createConnection.request.parse(JSON.parse(createBody))).toEqual({
-      adapterKey: 'qq-openclaw',
+      adapterKey: 'fixture-beta',
       alias: '主群机器人',
       configuration: { appId: 'app-1', proactiveSend: true },
-      credentials: { clientSecretCredentialRef: 'secret-qq-1' },
+      credentials: { clientSecretCredentialRef: 'secret-fixture-1' },
     })
-    await host.execute('connections.updateAlias', { connectionId: qqConnectionId, alias: '新主群机器人' })
+    await host.execute('connections.updateAlias', { connectionId: externalConnectionId, alias: '新主群机器人' })
     const aliasCall = requests.find(
-      (request) => request.url === `/api/connections/${qqConnectionId}/alias` && request.init?.method === 'POST',
+      (request) => request.url === `/api/connections/${externalConnectionId}/alias` && request.init?.method === 'POST',
     )
     expect(aliasCall?.init?.method).toBe('POST')
     const aliasBody = aliasCall?.init?.body
@@ -982,9 +998,13 @@ describe('HttpProductHost', () => {
     fetchMock = vi.fn((input: string, init?: RequestInit) => {
       requests.push({ url: input, ...(init === undefined ? {} : { init }) })
       if (input === '/api/snapshot') return Promise.resolve(stubResponse(200, snapshotBody()))
-      if (input === `/api/connections/${qqConnectionId}/test` && init?.method === 'POST') {
+      if (input === `/api/connections/${externalConnectionId}/test` && init?.method === 'POST') {
         return Promise.resolve(
-          stubResponse(200, { status: 'sent', channelId: qqChannelId, platformMessageId: 'qq-message-1' }),
+          stubResponse(200, {
+            status: 'sent',
+            channelId: externalChannelId,
+            platformMessageId: 'fixture-message-1',
+          }),
         )
       }
       return Promise.resolve(stubResponse(404, { error: { code: 'not-found', message: 'x' } }))
@@ -997,20 +1017,20 @@ describe('HttpProductHost', () => {
     await flush()
 
     const result = await host.execute('connections.test', {
-      connectionId: qqConnectionId,
+      connectionId: externalConnectionId,
       direction: 'send',
-      channelId: qqChannelId,
+      channelId: externalChannelId,
     })
-    expect(result).toMatchObject({ status: 'sent', platformMessageId: 'qq-message-1' })
+    expect(result).toMatchObject({ status: 'sent', platformMessageId: 'fixture-message-1' })
     const testCall = requests.find(
-      (request) => request.url === `/api/connections/${qqConnectionId}/test` && request.init?.method === 'POST',
+      (request) => request.url === `/api/connections/${externalConnectionId}/test` && request.init?.method === 'POST',
     )
     expect(testCall?.init?.method).toBe('POST')
     const testBody = testCall?.init?.body
     if (typeof testBody !== 'string') throw new TypeError('connection test request body must be JSON text.')
     expect(HostApiContracts.testConnection.request.parse(JSON.parse(testBody))).toEqual({
       direction: 'send',
-      channelId: qqChannelId,
+      channelId: externalChannelId,
     })
     unsubscribe()
   })
@@ -1663,6 +1683,60 @@ describe('HttpProductHost', () => {
     expect(fetch).not.toHaveBeenCalled()
   })
 
+  it('loads paginated Connection events and applies connection-fact SSE updates', async () => {
+    const firstEventId = ConnectionEventIdSchema.parse('cev_FIRST')
+    const liveEventId = ConnectionEventIdSchema.parse('cev_LIVE')
+    const actorIdentityId = PlatformIdentityIdSchema.parse('pid_ACTOR')
+    const requests: string[] = []
+    fetchMock = vi.fn((input: string) => {
+      requests.push(input)
+      if (input === '/api/snapshot') return Promise.resolve(stubResponse(200, snapshotBody()))
+      if (input.startsWith(`/api/connections/${internalConnectionId}/events?`)) {
+        return Promise.resolve(
+          stubResponse(200, {
+            events: [
+              {
+                id: firstEventId,
+                connectionId: internalConnectionId,
+                activityKey: 'account-signal',
+                summary: '已有连接活动',
+                actor: { identityId: actorIdentityId, displayName: '参与者甲' },
+                occurredAt: 1_700_000_000_000,
+              },
+            ],
+            hasMore: true,
+          }),
+        )
+      }
+      return Promise.resolve(stubResponse(404, { error: { code: 'not-found', message: 'x' } }))
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    vi.stubGlobal('EventSource', FakeEventSource)
+
+    const host = new HttpProductHost()
+    const unsubscribe = host.subscribe(() => undefined)
+    await flush()
+    const page = await host.execute('connections.listEvents', {
+      connectionId: internalConnectionId,
+      limit: 30,
+    })
+    expect(page).toMatchObject({ events: [{ id: firstEventId, summary: '已有连接活动' }], hasMore: true })
+    expect(requests.some((url) => url.includes(`/api/connections/${internalConnectionId}/events?limit=30`))).toBe(true)
+
+    FakeEventSource.instances[0]?.emit('connection-fact', {
+      id: liveEventId,
+      connectionId: internalConnectionId,
+      activityKey: 'account-signal',
+      summary: '实时连接活动',
+      actor: { identityId: actorIdentityId, displayName: '参与者甲' },
+      occurredAt: 1_700_000_001_000,
+    })
+    expect(host.getSnapshot().connections[0]?.events).toMatchObject([
+      { id: liveEventId, summary: '实时连接活动', actor: { displayName: '参与者甲' } },
+    ])
+    unsubscribe()
+  })
+
   it('uses safe display placeholders instead of raw identifiers', async () => {
     const raw = snapshotBody()
     const [rawChannel] = raw.channels
@@ -1679,7 +1753,7 @@ describe('HttpProductHost', () => {
               {
                 ...rawChannel,
                 connectionId: secretConnectionId,
-                platformChannelId: 'qq-group-9876',
+                platformChannelId: 'opaque-group-9876',
                 kind: 'group',
                 displayName: '',
               },
@@ -1688,12 +1762,9 @@ describe('HttpProductHost', () => {
               {
                 id: secretConnectionId,
                 adapterKey: 'private-adapter-key',
-                appId: '',
-                proactiveSend: false,
-                credentialConfigured: false,
+                status: { state: 'stopped', proactiveSend: false, credentialConfigured: false, activities: {} },
                 channelCount: 1,
                 knownChannels: [],
-                gateway: { state: 'stopped' },
               },
             ],
             extensions: [],
@@ -1712,7 +1783,7 @@ describe('HttpProductHost', () => {
     expect(snapshot.agents[0]?.model).toBe('未命名模型')
     expect(snapshot.messages.find((message) => message.role === 'agent')?.author).toBe('未命名智能体')
     expect(snapshot.channels[0]).toMatchObject({
-      name: '群聊（尾号 9876）',
+      name: '未命名群聊',
       connectionName: '未命名连接',
     })
     expect(snapshot.connections[0]).toMatchObject({
@@ -1725,7 +1796,7 @@ describe('HttpProductHost', () => {
     unsubscribe()
   })
 
-  it('accepts QQ direct channels and projects them as private conversations', async () => {
+  it('accepts external direct channels and projects them as private conversations', async () => {
     const raw = snapshotBody()
     const [rawChannel] = raw.channels
     if (!rawChannel) throw new Error('Snapshot fixture must contain a channel.')
@@ -1738,7 +1809,7 @@ describe('HttpProductHost', () => {
             channels: [
               {
                 ...rawChannel,
-                connectionId: qqConnectionId,
+                connectionId: externalConnectionId,
                 platformChannelId: 'c2c:private-4321',
                 kind: 'direct',
                 displayName: '',
@@ -1746,14 +1817,17 @@ describe('HttpProductHost', () => {
             ],
             connections: [
               {
-                id: qqConnectionId,
-                adapterKey: 'qq-openclaw',
-                appId: '12345678',
-                proactiveSend: false,
-                credentialConfigured: true,
+                id: externalConnectionId,
+                adapterKey: 'fixture-beta',
+                status: {
+                  state: 'connected',
+                  proactiveSend: false,
+                  credentialConfigured: true,
+                  accountReference: '12345678',
+                  activities: {},
+                },
                 channelCount: 1,
-                knownChannels: [{ id: webChannelId, name: 'c2c:private-4321', kind: 'direct' }],
-                gateway: { state: 'connected' },
+                knownChannels: [{ id: webChannelId, name: '未命名私聊', kind: 'direct' }],
               },
             ],
           }),
@@ -1767,8 +1841,8 @@ describe('HttpProductHost', () => {
     const unsubscribe = host.subscribe(() => undefined)
     await flush()
 
-    expect(host.getSnapshot().channels[0]).toMatchObject({ kind: 'qq-direct', name: '私聊（尾号 4321）' })
-    expect(host.getSnapshot().connections[0]?.knownChannels[0]?.name).toBe('私聊（尾号 4321）')
+    expect(host.getSnapshot().channels[0]).toMatchObject({ kind: 'direct', name: '未命名私聊' })
+    expect(host.getSnapshot().connections[0]?.knownChannels[0]?.name).toBe('未命名私聊')
     unsubscribe()
   })
 
@@ -1787,7 +1861,7 @@ describe('HttpProductHost', () => {
     const host = new HttpProductHost()
     await expect(
       host.execute('connections.create', {
-        adapterKey: 'qq-openclaw',
+        adapterKey: 'fixture-beta',
         configuration: { appId: 'app-1', proactiveSend: false },
         credentials: { clientSecretCredentialRef: 'bad-secret' },
       }),

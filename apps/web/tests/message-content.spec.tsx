@@ -17,12 +17,12 @@ const message = (parts: ConversationMessage['parts']): ConversationMessage => ({
 
 describe('message perspective', () => {
   it('keeps the two channel perspectives explicit', () => {
-    expect(resolveMessageSide({ channelKind: 'web', role: 'member' })).toBe('right')
-    expect(resolveMessageSide({ channelKind: 'web', role: 'agent' })).toBe('left')
-    expect(resolveMessageSide({ channelKind: 'qq-group', role: 'member' })).toBe('left')
-    expect(resolveMessageSide({ channelKind: 'qq-direct', role: 'agent' })).toBe('right')
-    expect(resolveMessageSide({ channelKind: 'qq-group', role: 'agent', origin: 'admin-console' })).toBe('right')
-    expect(resolveMessageSide({ channelKind: 'web', role: 'system' })).toBe('system')
+    expect(resolveMessageSide({ channelKind: 'internal', role: 'member' })).toBe('right')
+    expect(resolveMessageSide({ channelKind: 'internal', role: 'agent' })).toBe('left')
+    expect(resolveMessageSide({ channelKind: 'group', role: 'member' })).toBe('left')
+    expect(resolveMessageSide({ channelKind: 'direct', role: 'agent' })).toBe('right')
+    expect(resolveMessageSide({ channelKind: 'group', role: 'agent', origin: 'admin-console' })).toBe('right')
+    expect(resolveMessageSide({ channelKind: 'internal', role: 'system' })).toBe('system')
   })
 })
 
@@ -85,14 +85,14 @@ describe('MessageContent', () => {
             { type: 'text', text: ' 邀请加入了频道。' },
             {
               type: 'rich',
-              adapterKey: 'onebot-11',
+              adapterKey: 'fixture-beta',
               kind: 'legacy-notice',
               summary: '旧事件摘要',
               targetUrl: 'https://example.test/legacy',
             },
           ]),
           role: 'system',
-          activityType: 'member-joined',
+          activityKey: 'member-joined',
         }}
       />,
     )
@@ -130,7 +130,7 @@ describe('MessageContent', () => {
         message={message([
           {
             type: 'rich',
-            adapterKey: 'qq-openclaw',
+            adapterKey: 'fixture-beta',
             kind: 'forward',
             summary: '群聊的聊天记录（3 条）',
             title: '群聊的聊天记录',
@@ -159,7 +159,7 @@ describe('MessageContent', () => {
         message={message([
           {
             type: 'rich',
-            adapterKey: 'qq-openclaw',
+            adapterKey: 'fixture-beta',
             kind: 'miniapp',
             summary: '示例来源 · 示例分享',
             title: '示例分享',
@@ -192,7 +192,7 @@ describe('MessageContent', () => {
         message={message([
           {
             type: 'rich',
-            adapterKey: 'qq-openclaw',
+            adapterKey: 'fixture-beta',
             kind: 'miniapp',
             summary: '示例来源 · 示例分享',
             title: '示例分享',

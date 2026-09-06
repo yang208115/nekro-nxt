@@ -3,9 +3,11 @@ import type {
   AdapterConnectionDiagnostic,
   AdapterConnectionHostContext,
   AdapterConnectionRuntime,
+  AdapterConnectionInboundEvent,
   AdapterDeliveryReceipt,
-  AdapterInboundEvent,
+  AdapterChannelInboundEvent,
   AdapterOutboundCapabilities,
+  AdapterRuntimeCapabilities,
   AdapterHttpRequest,
   AdapterHttpResponse,
   AdapterTransportService,
@@ -19,6 +21,11 @@ import {
   ChannelIdSchema,
   ChannelMemberIdSchema,
   ConnectionIdSchema,
+  ConnectionEventIdSchema,
+  PlatformIdentityIdSchema,
+  type ChannelId,
+  type ChannelMemberId,
+  type ConnectionId,
   type JsonValue,
 } from '@nekro-nxt/contracts'
 
@@ -87,22 +94,32 @@ export class FakeAdapterTransport implements AdapterTransportService {
 /** Complete in-memory Host context for generated Adapter lifecycle tests. */
 export const createFakeAdapterHostContext = (clock = new VirtualClock(1)) => {
   const transport = new FakeAdapterTransport()
-  const events: AdapterInboundEvent[] = []
+  const events: AdapterChannelInboundEvent[] = []
+  const connectionEvents: AdapterConnectionInboundEvent[] = []
   const diagnostics: AdapterConnectionDiagnostic[] = []
   const channels = new Map<string, ReturnType<typeof ChannelIdSchema.parse>>()
   const channelKinds = new Map<string, 'direct' | 'group'>()
+  const identities = new Map<string, ReturnType<typeof PlatformIdentityIdSchema.parse>>()
   const members = new Map<string, ReturnType<typeof ChannelMemberIdSchema.parse>>()
   const states = new Map<string, JsonValue>()
   const credentials = new Map<string, string>()
   let channelSequence = 0
+  let identitySequence = 0
   let memberSequence = 0
   const context: AdapterConnectionHostContext = {
     connectionId: ConnectionIdSchema.parse('con_HARNESS'),
     now: () => clock.now(),
-    acceptInbound: (event) => {
+    acceptChannelInbound: (event) => {
       events.push(structuredClone(event))
       return Promise.resolve({
         channelEventId: ChannelEventIdSchema.parse(`evt_HARNESS${events.length}`),
+        inserted: true,
+      })
+    },
+    acceptConnectionInbound: (event) => {
+      connectionEvents.push(structuredClone(event))
+      return Promise.resolve({
+        connectionEventId: ConnectionEventIdSchema.parse(`cev_HARNESS${connectionEvents.length}`),
         inserted: true,
       })
     },
@@ -119,6 +136,15 @@ export const createFakeAdapterHostContext = (clock = new VirtualClock(1)) => {
       resolvePlatformChannelId: (channelId) =>
         Promise.resolve([...channels].find(([, candidate]) => candidate === channelId)?.[0]),
       resolveKind: (channelId) => Promise.resolve(channelKinds.get(channelId)),
+    },
+    identities: {
+      ensure: (input) => {
+        const existing = identities.get(input.platformUserId)
+        if (existing) return Promise.resolve(existing)
+        const identityId = PlatformIdentityIdSchema.parse(`pid_HARNESS${++identitySequence}`)
+        identities.set(input.platformUserId, identityId)
+        return Promise.resolve(identityId)
+      },
     },
     members: {
       ensure: (input) => {
@@ -179,8 +205,10 @@ export const createFakeAdapterHostContext = (clock = new VirtualClock(1)) => {
     clock,
     transport,
     events,
+    connectionEvents,
     diagnostics,
     channels,
+    identities,
     members,
     credentials,
     states,
@@ -256,7 +284,7 @@ export const FAKE_ADAPTER_CAPABILITIES: AdapterOutboundCapabilities = {
 
 /** Deterministic Adapter double implementing the same lifecycle and receipts as production adapters. */
 export class FakeAdapterConnection implements AdapterConnectionRuntime {
-  readonly capabilities: AdapterOutboundCapabilities
+  readonly capabilities: AdapterRuntimeCapabilities
   readonly deliveries: PhysicalDeliveryRequest[] = []
   readonly #context: AdapterConnectionContext
   readonly #receipts: AdapterDeliveryReceipt[] = []
@@ -264,7 +292,7 @@ export class FakeAdapterConnection implements AdapterConnectionRuntime {
 
   constructor(context: AdapterConnectionContext, capabilities = FAKE_ADAPTER_CAPABILITIES) {
     this.#context = context
-    this.capabilities = capabilities
+    this.capabilities = { outbound: capabilities, activities: {} }
   }
 
   start(): Promise<void> {
@@ -282,9 +310,9 @@ export class FakeAdapterConnection implements AdapterConnectionRuntime {
     this.#receipts.push(receipt)
   }
 
-  receive(event: AdapterInboundEvent) {
+  receive(event: AdapterChannelInboundEvent) {
     if (!this.#running) return Promise.reject(new Error('Fake adapter connection is not running.'))
-    return this.#context.acceptInbound(event)
+    return this.#context.acceptChannelInbound(event)
   }
 
   deliver(request: PhysicalDeliveryRequest, signal: AbortSignal): Promise<AdapterDeliveryReceipt> {
@@ -301,6 +329,93 @@ export class FakeAdapterConnection implements AdapterConnectionRuntime {
     )
   }
 }
+
+export interface FakeLocalInboundMessage {
+  readonly channelId: ChannelId
+  readonly clientEventId: string
+  readonly senderMemberId?: ChannelMemberId
+  readonly parts: PhysicalDeliveryRequest['parts']
+  readonly replyToBot?: boolean
+  readonly receivedAt?: number
+}
+
+export interface FakeLocalOutboundEvent {
+  readonly platformMessageId: string
+  readonly request: PhysicalDeliveryRequest
+}
+
+/** Fictional in-process Adapter used by app tests without importing any first-party Adapter package. */
+export class FakeLocalChannelConnection implements AdapterConnectionRuntime {
+  readonly capabilities: AdapterRuntimeCapabilities = { outbound: FAKE_ADAPTER_CAPABILITIES, activities: {} }
+  readonly localChannel = { postMessage: (input: FakeLocalInboundMessage) => this.postMessage(input) }
+  readonly #context: Pick<AdapterConnectionContext, 'connectionId' | 'acceptChannelInbound' | 'now'>
+  readonly #adapterKey: string
+  readonly #listeners = new Set<(event: FakeLocalOutboundEvent) => Promise<void> | void>()
+  #running = false
+  #sequence = 0
+
+  constructor(
+    adapterKey: string,
+    connectionId: ConnectionId,
+    acceptChannelInbound: AdapterConnectionContext['acceptChannelInbound'],
+    now: () => number = Date.now,
+  ) {
+    this.#adapterKey = adapterKey
+    this.#context = { connectionId, acceptChannelInbound, now }
+  }
+
+  start(): Promise<void> {
+    this.#running = true
+    return Promise.resolve()
+  }
+
+  stop(): Promise<void> {
+    this.#running = false
+    this.#listeners.clear()
+    return Promise.resolve()
+  }
+
+  subscribe(listener: (event: FakeLocalOutboundEvent) => Promise<void> | void): () => void {
+    this.#listeners.add(listener)
+    return () => this.#listeners.delete(listener)
+  }
+
+  postMessage(input: FakeLocalInboundMessage) {
+    if (!this.#running) return Promise.reject(new Error('Fake local Adapter is not running.'))
+    const receivedAt = input.receivedAt ?? this.#context.now()
+    return this.#context.acceptChannelInbound({
+      connectionId: this.#context.connectionId,
+      channelId: input.channelId,
+      adapterKey: this.#adapterKey,
+      platformEventId: input.clientEventId,
+      platformMessageId: input.clientEventId,
+      kind: 'message-created',
+      ...(input.senderMemberId === undefined ? {} : { senderMemberId: input.senderMemberId }),
+      parts: [...input.parts],
+      platformTimestamp: receivedAt,
+      receivedAt,
+      dedupeKey: `fixture-local:${input.clientEventId}`,
+      ...(input.replyToBot === undefined ? {} : { facts: { replyToBot: input.replyToBot } }),
+    })
+  }
+
+  async deliver(request: PhysicalDeliveryRequest, signal: AbortSignal): Promise<AdapterDeliveryReceipt> {
+    if (!this.#running) throw new Error('Fake local Adapter is not running.')
+    if (signal.aborted) return { status: 'failed', failure: { kind: 'transient', message: 'Delivery aborted.' } }
+    const platformMessageId = `fixture-message-${++this.#sequence}`
+    await Promise.all(
+      [...this.#listeners].map((listener) => Promise.resolve().then(() => listener({ platformMessageId, request }))),
+    )
+    return { status: 'sent', platformMessageId }
+  }
+}
+
+export const createFakeLocalChannelConnection = (
+  connectionId: ConnectionId,
+  acceptChannelInbound: AdapterConnectionContext['acceptChannelInbound'],
+  now: () => number = Date.now,
+  adapterKey = 'fixture-alpha',
+): FakeLocalChannelConnection => new FakeLocalChannelConnection(adapterKey, connectionId, acceptChannelInbound, now)
 
 interface ScenarioAction {
   readonly id: number

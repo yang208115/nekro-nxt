@@ -1,13 +1,14 @@
-import type { AdapterInboundEvent } from '@nekro-nxt/adapter-sdk'
+import type { AdapterChannelInboundEvent, AdapterConnectionInboundEvent } from '@nekro-nxt/adapter-sdk'
 import type {
   AgentId,
   AgentRevisionId,
   AssetId,
   ChannelEventId,
-  ChannelActivityType,
+  AdapterActivityKey,
   ChannelId,
   ChannelMemberId,
   ConnectionId,
+  ConnectionEventId,
   JsonValue,
   LogicalMessageId,
   MessagePart,
@@ -18,10 +19,11 @@ import {
   AgentIdSchema,
   AgentRevisionIdSchema,
   ChannelEventIdSchema,
-  ChannelActivityTypeSchema,
+  AdapterActivityKeySchema,
   ChannelIdSchema,
   ChannelMemberIdSchema,
   ConnectionIdSchema,
+  ConnectionEventIdSchema,
   LogicalMessageIdSchema,
   messagePartAssetIds,
   messagePartsSearchText,
@@ -103,14 +105,19 @@ export interface ConnectionRecord {
   readonly alias?: string
   readonly config: JsonValue
   readonly credentialRefs: Readonly<Record<string, string>>
+  readonly activityTriggerDefaults: readonly AdapterActivityKey[]
   readonly createdAt: number
+}
+
+export interface ArchivedConnectionRecord extends ConnectionRecord {
+  readonly archivedAt: number
 }
 
 export interface ChannelRecord {
   readonly id: ChannelId
   readonly connectionId: ConnectionId
   readonly platformChannelId: string
-  readonly kind: 'web' | 'direct' | 'group'
+  readonly kind: 'internal' | 'direct' | 'group'
   readonly displayName?: string
   /** Set only for the built-in Channel atomically created with this intelligent-agent. */
   readonly autoCreatedForAgentId?: AgentId
@@ -161,7 +168,8 @@ export interface BindingRecord {
   readonly agentId: AgentId
   readonly triggerPolicy: BindingTriggerPolicy
   readonly processingFeedback: 'auto' | 'off'
-  readonly eventTriggers: readonly ChannelActivityType[]
+  /** Missing keys inherit the concrete Connection default. */
+  readonly activityTriggerOverrides: Readonly<Record<AdapterActivityKey, boolean>>
   readonly boundAt: number
 }
 
@@ -170,17 +178,30 @@ export interface ChannelEventRecord {
   readonly logicalMessageId: LogicalMessageId
   readonly channelId: ChannelId
   readonly platformMessageId?: string
-  readonly kind: AdapterInboundEvent['kind']
-  readonly activityType?: ChannelActivityType
+  readonly kind: AdapterChannelInboundEvent['kind']
+  readonly activityKey?: AdapterActivityKey
   readonly targetPlatformMessageId?: string
   readonly targetLogicalMessageId?: LogicalMessageId
-  readonly senderMemberId?: AdapterInboundEvent['senderMemberId']
+  readonly senderMemberId?: AdapterChannelInboundEvent['senderMemberId']
   readonly parts: readonly MessagePart[]
   readonly sourceTimestamp: number
   readonly receivedAt: number
   readonly dedupeKey: string
   readonly facts?: Readonly<Record<string, JsonValue>>
   readonly searchText: string
+}
+
+export interface ConnectionEventRecord {
+  readonly id: ConnectionEventId
+  readonly connectionId: ConnectionId
+  readonly activityKey: AdapterActivityKey
+  readonly summary: string
+  readonly actorIdentityId?: PlatformIdentityId
+  readonly subjectIdentityId?: PlatformIdentityId
+  readonly sourceTimestamp: number
+  readonly receivedAt: number
+  readonly dedupeKey: string
+  readonly facts?: Readonly<Record<string, JsonValue>>
 }
 
 export interface PlatformMessageReferenceRecord {
@@ -200,6 +221,11 @@ export interface CreateAgentWithChannelCommit extends CreateAgentCommit {
 
 export interface AppendChannelEventCommit {
   readonly event: ChannelEventRecord
+  readonly inserted: boolean
+}
+
+export interface AppendConnectionEventCommit {
+  readonly event: ConnectionEventRecord
   readonly inserted: boolean
 }
 
@@ -225,8 +251,22 @@ export interface CoreRepository {
   ): void
   createConnection(record: ConnectionRecord): void
   updateConnectionAlias(id: ConnectionId, alias?: string): void
+  updateConnectionActivityTriggerDefaults(id: ConnectionId, activityKeys: readonly AdapterActivityKey[]): void
+  archiveConnection(id: ConnectionId, archivedAt: number): void
+  restoreConnection(id: ConnectionId): void
+  purgeConnection(id: ConnectionId): void
   getConnection(id: ConnectionId): ConnectionRecord | undefined
+  getArchivedConnection(id: ConnectionId): ArchivedConnectionRecord | undefined
+  listArchivedConnections(): readonly ArchivedConnectionRecord[]
   listConnectionIdsByAdapter(adapterKey?: string): readonly ConnectionId[]
+  appendConnectionEvent(candidate: ConnectionEventRecord): AppendConnectionEventCommit
+  listConnectionEvents(
+    connectionId: ConnectionId,
+    options?: {
+      readonly before?: { readonly receivedAt: number; readonly id: ConnectionEventId }
+      readonly limit?: number
+    },
+  ): readonly ConnectionEventRecord[]
   createChannel(record: ChannelRecord): void
   ensureChannel(record: ChannelRecord): ChannelRecord
   tombstoneChannel(id: ChannelId, deletedAt: number): void
@@ -400,6 +440,7 @@ const connectionInputSchema = z
       .regex(/^[a-z0-9][a-z0-9-]*$/),
     config: z.json(),
     credentialRefs: z.record(z.string().min(1), z.string().trim().min(1)).default({}),
+    activityTriggerDefaults: z.array(AdapterActivityKeySchema).default([]),
     alias: ConnectionAliasSchema.optional(),
   })
   .strict()
@@ -408,7 +449,7 @@ const channelInputSchema = z
   .object({
     connectionId: z.string().trim().min(1),
     platformChannelId: z.string().trim().min(1),
-    kind: z.enum(['web', 'direct', 'group']),
+    kind: z.enum(['internal', 'direct', 'group']),
     displayName: z.string().trim().min(1).max(120).optional(),
   })
   .strict()
@@ -423,13 +464,15 @@ const observedIdentitySchema = z
   })
   .strict()
 
+const connectionIdentitySchema = observedIdentitySchema.omit({ channelId: true })
+
 const bindingInputSchema = z
   .object({
     channelId: z.string().trim().min(1),
     agentId: z.string().trim().min(1),
     triggerPolicy: z.enum(['always', 'mentioned-or-replied', 'command', 'observe-only']),
     processingFeedback: z.enum(['auto', 'off']).default('auto'),
-    eventTriggers: z.array(ChannelActivityTypeSchema).default([]),
+    activityTriggerOverrides: z.record(AdapterActivityKeySchema, z.boolean()).default({}),
   })
   .strict()
 
@@ -631,7 +674,7 @@ export class CoreService {
     const channel: ChannelRecord = {
       id: channelId,
       connectionId: channelInput.connectionId,
-      platformChannelId: channelInput.platformChannelId ?? `web-${agentId}`,
+      platformChannelId: channelInput.platformChannelId ?? `internal-${agentId}`,
       kind: channelInput.kind,
       ...(channelInput.displayName === undefined ? {} : { displayName: channelInput.displayName }),
       autoCreatedForAgentId: agentId,
@@ -642,7 +685,7 @@ export class CoreService {
       agentId,
       triggerPolicy: channelInput.triggerPolicy,
       processingFeedback: 'auto',
-      eventTriggers: [],
+      activityTriggerOverrides: {},
       boundAt: createdAt,
     }
     const commit = { definition, revision, channel, binding }
@@ -692,6 +735,7 @@ export class CoreService {
     readonly adapterKey: string
     readonly config: JsonValue
     readonly credentialRefs?: Readonly<Record<string, string>>
+    readonly activityTriggerDefaults?: readonly AdapterActivityKey[]
     readonly alias?: string
   }): ConnectionRecord {
     const parsed = connectionInputSchema.parse(input)
@@ -700,6 +744,7 @@ export class CoreService {
       adapterKey: parsed.adapterKey,
       config: parsed.config,
       credentialRefs: parsed.credentialRefs,
+      activityTriggerDefaults: parsed.activityTriggerDefaults,
       createdAt: this.#timestamp(),
       ...(parsed.alias === undefined ? {} : { alias: parsed.alias }),
     }
@@ -718,10 +763,57 @@ export class CoreService {
         adapterKey: current.adapterKey,
         config: current.config,
         credentialRefs: current.credentialRefs,
+        activityTriggerDefaults: current.activityTriggerDefaults,
         createdAt: current.createdAt,
       }
     }
     return { ...current, alias: normalizedAlias }
+  }
+
+  updateConnectionActivityTriggerDefaults(
+    connectionId: ConnectionId,
+    activityKeys: readonly AdapterActivityKey[],
+  ): ConnectionRecord {
+    const current = this.#repository.getConnection(connectionId)
+    if (!current) throw new Error(`Unknown connection: ${connectionId}`)
+    const parsed = z.array(AdapterActivityKeySchema).parse(activityKeys)
+    if (new Set(parsed).size !== parsed.length) throw new Error('Connection activity defaults must be unique.')
+    this.#repository.updateConnectionActivityTriggerDefaults(connectionId, parsed)
+    return { ...current, activityTriggerDefaults: parsed }
+  }
+
+  archiveConnection(connectionId: ConnectionId): ArchivedConnectionRecord {
+    const current = this.#repository.getConnection(connectionId)
+    if (!current) throw new Error(`Unknown connection: ${connectionId}`)
+    const archivedAt = this.#timestamp()
+    this.#repository.archiveConnection(connectionId, archivedAt)
+    return { ...current, archivedAt }
+  }
+
+  restoreConnection(connectionId: ConnectionId): ConnectionRecord {
+    const archived = this.#repository.getArchivedConnection(connectionId)
+    if (!archived) throw new Error(`Unknown archived connection: ${connectionId}`)
+    this.#repository.restoreConnection(connectionId)
+    return {
+      id: archived.id,
+      adapterKey: archived.adapterKey,
+      ...(archived.alias === undefined ? {} : { alias: archived.alias }),
+      config: archived.config,
+      credentialRefs: archived.credentialRefs,
+      activityTriggerDefaults: archived.activityTriggerDefaults,
+      createdAt: archived.createdAt,
+    }
+  }
+
+  purgeConnection(connectionId: ConnectionId): void {
+    if (!this.#repository.getConnection(connectionId) && !this.#repository.getArchivedConnection(connectionId)) {
+      throw new Error(`Unknown connection: ${connectionId}`)
+    }
+    this.#repository.purgeConnection(connectionId)
+  }
+
+  listArchivedConnections(): readonly ArchivedConnectionRecord[] {
+    return this.#repository.listArchivedConnections()
   }
 
   listConnections(): readonly ConnectionRecord[] {
@@ -739,6 +831,24 @@ export class CoreService {
     return this.#repository.listConnectionIdsByAdapter(adapterKey).flatMap((id) => {
       const connection = this.#repository.getConnection(id)
       return connection ? [connection] : []
+    })
+  }
+
+  ensurePlatformIdentity(input: {
+    readonly connectionId: ConnectionId
+    readonly platformUserId: string
+    readonly displayName?: string
+    readonly observedAt: number
+  }): PlatformIdentityRecord {
+    const parsed = connectionIdentitySchema.parse(input)
+    if (!this.#repository.getConnection(input.connectionId)) {
+      throw new Error(`Unknown connection: ${input.connectionId}`)
+    }
+    return this.#repository.ensurePlatformIdentity({
+      id: PlatformIdentityIdSchema.parse(`pid_${this.#nextUlid()}`),
+      connectionId: input.connectionId,
+      platformUserId: parsed.platformUserId,
+      ...(parsed.displayName === undefined ? {} : { displayName: parsed.displayName }),
     })
   }
 
@@ -810,11 +920,11 @@ export class CoreService {
     if (!channel || channel.connectionId !== input.connectionId) {
       throw new Error(`Channel ${input.channelId} does not belong to connection ${input.connectionId}.`)
     }
-    const identity = this.#repository.ensurePlatformIdentity({
-      id: PlatformIdentityIdSchema.parse(`pid_${this.#nextUlid()}`),
+    const identity = this.ensurePlatformIdentity({
       connectionId: input.connectionId,
       platformUserId: parsed.platformUserId,
       ...(parsed.displayName === undefined ? {} : { displayName: parsed.displayName }),
+      observedAt: parsed.observedAt,
     })
     const member = this.#repository.ensureChannelMember({
       id: ChannelMemberIdSchema.parse(`mbr_${this.#nextUlid()}`),
@@ -878,7 +988,7 @@ export class CoreService {
     readonly agentId: AgentId
     readonly triggerPolicy: BindingTriggerPolicy
     readonly processingFeedback?: 'auto' | 'off'
-    readonly eventTriggers?: readonly ChannelActivityType[]
+    readonly activityTriggerOverrides?: Readonly<Record<AdapterActivityKey, boolean>>
   }): BindingRecord {
     const parsed = bindingInputSchema.parse(input)
     if (!this.#repository.getChannel(input.channelId)) throw new Error(`Unknown channel: ${input.channelId}`)
@@ -890,7 +1000,7 @@ export class CoreService {
       agentId: input.agentId,
       triggerPolicy: parsed.triggerPolicy,
       processingFeedback: parsed.processingFeedback,
-      eventTriggers: parsed.eventTriggers,
+      activityTriggerOverrides: parsed.activityTriggerOverrides,
       boundAt: this.#timestamp(),
     }
     return this.#repository.replaceBinding(record)
@@ -901,7 +1011,7 @@ export class CoreService {
     readonly agentId: AgentId
     readonly triggerPolicy: BindingTriggerPolicy
     readonly processingFeedback?: 'auto' | 'off'
-    readonly eventTriggers?: readonly ChannelActivityType[]
+    readonly activityTriggerOverrides?: Readonly<Record<AdapterActivityKey, boolean>>
   }): BindingRecord {
     const parsed = bindingInputSchema.parse(input)
     if (!this.#repository.getChannel(input.channelId)) throw new Error(`Unknown channel: ${input.channelId}`)
@@ -911,7 +1021,7 @@ export class CoreService {
       agentId: input.agentId,
       triggerPolicy: parsed.triggerPolicy,
       processingFeedback: parsed.processingFeedback,
-      eventTriggers: parsed.eventTriggers,
+      activityTriggerOverrides: parsed.activityTriggerOverrides,
       boundAt: this.#timestamp(),
     })
   }
@@ -925,7 +1035,7 @@ export class CoreService {
     return this.#repository.listBindings(channelId)
   }
 
-  appendInbound(event: AdapterInboundEvent): AppendChannelEventCommit {
+  appendInbound(event: AdapterChannelInboundEvent): AppendChannelEventCommit {
     const connection = this.#repository.getConnection(event.connectionId)
     if (!connection || connection.adapterKey !== event.adapterKey) {
       throw new Error(`Inbound adapter does not own connection ${event.connectionId}.`)
@@ -956,7 +1066,7 @@ export class CoreService {
       channelId: event.channelId,
       ...(event.platformMessageId === undefined ? {} : { platformMessageId: event.platformMessageId }),
       kind: event.kind,
-      ...(event.activityType === undefined ? {} : { activityType: event.activityType }),
+      ...(event.activityKey === undefined ? {} : { activityKey: event.activityKey }),
       ...(event.targetPlatformMessageId === undefined
         ? {}
         : { targetPlatformMessageId: event.targetPlatformMessageId }),
@@ -977,6 +1087,41 @@ export class CoreService {
       }
     }
     return this.#repository.appendChannelEvent(record, occurrences)
+  }
+
+  appendConnectionInbound(event: AdapterConnectionInboundEvent): AppendConnectionEventCommit {
+    const connection = this.#repository.getConnection(event.connectionId)
+    if (!connection || connection.adapterKey !== event.adapterKey) {
+      throw new Error(`Inbound adapter does not own connection ${event.connectionId}.`)
+    }
+    for (const identityId of [event.actorIdentityId, event.subjectIdentityId]) {
+      if (identityId === undefined) continue
+      const identity = this.#repository.getPlatformIdentity(identityId)
+      if (!identity || identity.connectionId !== event.connectionId) {
+        throw new Error(`Inbound identity ${identityId} does not belong to connection ${event.connectionId}.`)
+      }
+    }
+    const record: ConnectionEventRecord = {
+      id: ConnectionEventIdSchema.parse(`cev_${this.#nextUlid()}`),
+      connectionId: event.connectionId,
+      activityKey: event.activityKey,
+      summary: event.summary,
+      ...(event.actorIdentityId === undefined ? {} : { actorIdentityId: event.actorIdentityId }),
+      ...(event.subjectIdentityId === undefined ? {} : { subjectIdentityId: event.subjectIdentityId }),
+      sourceTimestamp: event.sourceTimestamp,
+      receivedAt: event.receivedAt,
+      dedupeKey: event.dedupeKey,
+      ...(event.facts === undefined ? {} : { facts: event.facts }),
+    }
+    return this.#repository.appendConnectionEvent(record)
+  }
+
+  listConnectionEvents(
+    connectionId: ConnectionId,
+    options?: Parameters<CoreRepository['listConnectionEvents']>[1],
+  ): readonly ConnectionEventRecord[] {
+    if (!this.#repository.getConnection(connectionId)) throw new Error(`Unknown connection: ${connectionId}`)
+    return this.#repository.listConnectionEvents(connectionId, options)
   }
 
   #timestamp(): number {

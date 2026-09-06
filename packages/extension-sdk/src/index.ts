@@ -1,4 +1,4 @@
-import type { AdapterHostContributionV1 } from '@nekro-nxt/adapter-sdk'
+import type { AdapterHostContributionV2 } from '@nekro-nxt/adapter-sdk'
 import type { ElementType, ReactNode } from 'react'
 import type {
   AdapterClientSlotName,
@@ -25,7 +25,7 @@ export type {
   AdapterConnectionHostContext,
   AdapterConnectionRuntime,
   AdapterDeliveryReceipt,
-  AdapterHostContributionV1,
+  AdapterHostContributionV2,
   AdapterStoredConnectionConfiguration,
   AdapterOutboundCapabilities,
   AdapterWebSocketConnection,
@@ -94,7 +94,7 @@ export interface ExtensionHostEnvironment {
     registerTool(context: ExtensionHostContext, tool: ExtensionToolDefinition): () => void
     handle(method: string, handler: ExtensionRpcHandler): () => void
     /** Host-scoped Adapter Revisions register exactly one contribution during factory evaluation. */
-    registerAdapter(contribution: AdapterHostContributionV1): () => void
+    registerAdapter(contribution: AdapterHostContributionV2): () => void
   }
   readonly config: ExtensionJsonValue
 }
@@ -167,7 +167,7 @@ export interface AdapterChannelInspectorSlotProps {
   readonly adapterKey: string
   readonly connectionId: string
   readonly channelId: string
-  readonly channelKind: 'web' | 'group' | 'direct'
+  readonly channelKind: 'internal' | 'group' | 'direct'
 }
 
 export interface AdapterClientSlotPropsMap {
@@ -346,13 +346,14 @@ export interface NekroNxtExtensionAuthoringReference {
       }
     }
     readonly hostAdapter: {
-      readonly apiVersion: 1
+      readonly apiVersion: 2
       readonly scope: 'host-adapter'
       readonly registration: 'harness.registerAdapter'
       readonly oneStableKey: true
       readonly clientSlots: readonly AdapterClientSlotName[]
       readonly allowedHostServices: readonly [
         'channels',
+        'identities',
         'members',
         'messages',
         'assets',
@@ -361,7 +362,7 @@ export interface NekroNxtExtensionAuthoringReference {
         'diagnostics',
         'transport',
       ]
-      readonly configSchemaExample: AdapterHostContributionV1['descriptor']['configSchema']
+      readonly configSchemaExample: AdapterHostContributionV2['descriptor']['configSchema']
       readonly cannotMixWith: readonly ['tool', 'rpc', 'agent-client-slot']
     }
     readonly dshNativeWebUi: false
@@ -422,9 +423,12 @@ const HOST_ADAPTER_EXAMPLE = `const descriptor = {
   key: 'example-chat',
   displayName: 'Example Chat',
   description: 'Synthetic Adapter example.',
-  userCreatable: true,
+  provisioning: 'user-created',
   aliasEditable: true,
   channelDiscovery: 'adapter-observed',
+  channelKinds: ['direct', 'group'],
+  activities: [],
+  features: {},
   diagnostics: { receive: true, send: true },
   configSchema: {
     schemaVersion: 1,
@@ -437,7 +441,7 @@ const HOST_ADAPTER_EXAMPLE = `const descriptor = {
   }
 }
 harness.registerAdapter({
-  apiVersion: 1,
+  apiVersion: 2,
   descriptor,
   async create(context, stored) {
     // Only resolve stored.credentialRefs through context.credentials; never read raw secrets from configuration.
@@ -616,7 +620,7 @@ export const NEKRO_NXT_EXTENSION_AUTHORING_REFERENCE: NekroNxtExtensionAuthoring
       },
     },
     hostAdapter: {
-      apiVersion: 1,
+      apiVersion: 2,
       scope: 'host-adapter',
       registration: 'harness.registerAdapter',
       oneStableKey: true,
@@ -629,6 +633,7 @@ export const NEKRO_NXT_EXTENSION_AUTHORING_REFERENCE: NekroNxtExtensionAuthoring
       ],
       allowedHostServices: [
         'channels',
+        'identities',
         'members',
         'messages',
         'assets',

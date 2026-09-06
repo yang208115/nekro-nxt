@@ -1,5 +1,6 @@
 export const HOST_EVENT_STREAM_EVENTS = [
   'channel-fact',
+  'connection-fact',
   'runtime',
   'extensions-changed',
   'dsh-plugins-changed',

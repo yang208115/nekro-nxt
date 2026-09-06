@@ -1,4 +1,4 @@
-import type { AdapterConnectionContext, AdapterInboundEvent } from '@nekro-nxt/adapter-sdk'
+import type { AdapterConnectionContext, AdapterChannelInboundEvent } from '@nekro-nxt/adapter-sdk'
 import {
   AssetIdSchema,
   ChannelEventIdSchema,
@@ -64,7 +64,8 @@ const makeAssets = (overrides: Partial<QQAssetSource> = {}): QQAssetSource => ({
 const makeContext = (overrides: Partial<AdapterConnectionContext> = {}): AdapterConnectionContext => ({
   connectionId,
   now: () => 100,
-  acceptInbound: () => Promise.resolve({ channelEventId: ChannelEventIdSchema.parse('evt_edges'), inserted: true }),
+  acceptChannelInbound: () =>
+    Promise.resolve({ channelEventId: ChannelEventIdSchema.parse('evt_edges'), inserted: true }),
   ...overrides,
 })
 
@@ -198,7 +199,7 @@ describe('QQ OpenClaw connection boundaries', () => {
   })
 
   it('normalizes mentions, quotes, image/audio/file media, and empty-message fallbacks', async () => {
-    const accepted: AdapterInboundEvent[] = []
+    const accepted: AdapterChannelInboundEvent[] = []
     const quoteDiagnostics: QQQuoteDiagnostic[] = []
     let attachmentIndex = 0
     const inbound: QQInboundBridge = {
@@ -228,7 +229,7 @@ describe('QQ OpenClaw connection boundaries', () => {
     const adapter = makeAdapter({
       context: makeContext({
         now: () => 500,
-        acceptInbound: (event) => {
+        acceptChannelInbound: (event) => {
           accepted.push(event)
           return Promise.resolve({
             channelEventId: ChannelEventIdSchema.parse(`evt_edges${accepted.length}`),
@@ -316,7 +317,7 @@ describe('QQ OpenClaw connection boundaries', () => {
   })
 
   it('commits miniapp cards as rich parts and imports the preview into Asset', async () => {
-    const accepted: AdapterInboundEvent[] = []
+    const accepted: AdapterChannelInboundEvent[] = []
     const inbound: QQInboundBridge = {
       ensureTarget: () => Promise.resolve(channelId),
       ensureMember: () => Promise.resolve(memberId),
@@ -326,7 +327,7 @@ describe('QQ OpenClaw connection boundaries', () => {
     }
     const adapter = makeAdapter({
       context: makeContext({
-        acceptInbound: (event) => {
+        acceptChannelInbound: (event) => {
           accepted.push(event)
           return Promise.resolve({
             channelEventId: ChannelEventIdSchema.parse('evt_rich1'),
@@ -372,7 +373,7 @@ describe('QQ OpenClaw connection boundaries', () => {
   })
 
   it('commits flattened chat-record dumps as rich forwards and imports nested media', async () => {
-    const accepted: AdapterInboundEvent[] = []
+    const accepted: AdapterChannelInboundEvent[] = []
     const imported: string[] = []
     const inbound: QQInboundBridge = {
       ensureTarget: () => Promise.resolve(channelId),
@@ -391,7 +392,7 @@ describe('QQ OpenClaw connection boundaries', () => {
     }
     const adapter = makeAdapter({
       context: makeContext({
-        acceptInbound: (event) => {
+        acceptChannelInbound: (event) => {
           accepted.push(event)
           return Promise.resolve({
             channelEventId: ChannelEventIdSchema.parse('evt_forward1'),

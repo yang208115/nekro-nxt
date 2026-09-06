@@ -2,18 +2,11 @@ import {
   Activity,
   ArrowDown,
   FileUp,
-  Hand,
   Info,
   MoreHorizontal,
   PanelRightClose,
   PanelRightOpen,
   Send,
-  Shield,
-  Smile,
-  Sparkles,
-  Undo2,
-  UserMinus,
-  UserPlus,
   Wrench,
   type LucideIcon,
 } from 'lucide-react'
@@ -103,28 +96,22 @@ const runtimeDescription = (state: AgentRuntimeState): string => {
   return '智能体当前空闲。'
 }
 
-const systemEventIcon = (activityType: ConversationMessage['activityType']): LucideIcon => {
-  if (activityType === 'member-joined' || activityType === 'friend-added') return UserPlus
-  if (activityType === 'member-left') return UserMinus
-  if (activityType === 'member-poked') return Hand
-  if (activityType === 'message-recalled') return Undo2
-  if (activityType === 'message-reaction-added' || activityType === 'message-reaction-removed') return Smile
-  if (activityType === 'file-uploaded') return FileUp
-  if (activityType === 'essence-added' || activityType === 'essence-removed') return Sparkles
-  if (
-    activityType === 'member-muted' ||
-    activityType === 'member-unmuted' ||
-    activityType === 'member-admin-set' ||
-    activityType === 'member-admin-unset'
-  )
-    return Shield
+const systemEventIcon = (icon: string | undefined): LucideIcon => {
+  if (icon === 'file-text') return FileUp
+  if (icon === 'wrench') return Wrench
   return Activity
 }
 
 function SystemEventRow({ message }: { readonly message: ConversationMessage }) {
-  const Icon = systemEventIcon(message.activityType)
+  const icon = useProductStore((state) => {
+    const channel = state.channels.find((candidate) => candidate.id === message.channelId)
+    const connection = state.connections.find((candidate) => candidate.id === channel?.connectionId)
+    const descriptor = state.connectionAdapters.find((candidate) => candidate.key === connection?.adapterKey)
+    return descriptor?.activities.find((activity) => activity.key === message.activityKey)?.icon
+  })
+  const Icon = systemEventIcon(icon)
   return (
-    <div className={styles.systemEvent} data-side="system" data-activity-type={message.activityType}>
+    <div className={styles.systemEvent} data-side="system" data-activity-type={message.activityKey}>
       <span className={styles.systemEventRule} aria-hidden="true" />
       <div className={styles.systemEventMain}>
         <Icon className={styles.systemEventIcon} size={14} strokeWidth={1.8} aria-hidden="true" />
@@ -311,10 +298,10 @@ export function ChannelConversationPage() {
   const records = useMemo(() => flattenRuntimeRecords(runtime), [runtime])
   const selectedRecord = records.find((record) => record.id === selectedRecordId) ?? records.at(-1)
   const scrollAway = canvasView === 'chat' ? chatScroll.away : trajScroll.away
-  const webChannel = agent ? channels.find((item) => item.kind === 'web' && item.agentId === agent.id) : undefined
+  const webChannel = agent ? channels.find((item) => item.kind === 'internal' && item.agentId === agent.id) : undefined
   const connection = channel ? connections.find((item) => item.id === channel.connectionId) : undefined
-  const canSendOnWeb = channel?.kind === 'web' && Boolean(agent)
-  const canSendAsRobot = Boolean(channel && channel.kind !== 'web' && agent && connection?.proactiveSend)
+  const canSendOnWeb = channel?.kind === 'internal' && Boolean(agent)
+  const canSendAsRobot = Boolean(channel && channel.kind !== 'internal' && agent && connection?.proactiveSend)
   const toggleInspector = (): void => {
     useUiPreferences.getState().setInspectorCollapsed(!inspectorCollapsed)
   }
@@ -407,7 +394,7 @@ export function ChannelConversationPage() {
     try {
       await useProductStore.getState().deleteChannel(channel.id, channel.agentId || null)
       notify(
-        channel.kind === 'web' ? '内置频道已删除；历史记录可在审计中查询。' : '频道已从 NekroNXT 移除。',
+        channel.kind === 'internal' ? '内置频道已删除；历史记录可在审计中查询。' : '频道已从 NekroNXT 移除。',
         'success',
         `channel-delete:${channel.id}`,
       )
@@ -424,7 +411,7 @@ export function ChannelConversationPage() {
     '--nxt-inspector-width': `${inspectorWidth}px`,
   }
   const composerMode =
-    channel?.kind === 'web'
+    channel?.kind === 'internal'
       ? agent
         ? '发给智能体'
         : '请先绑定智能体'
@@ -434,7 +421,7 @@ export function ChannelConversationPage() {
           ? '发到频道'
           : '连接未允许主动发送'
   const composerExplanation =
-    channel?.kind === 'web'
+    channel?.kind === 'internal'
       ? agent
         ? `内容会作为当前内置频道的入站消息交给“${agent.name}”。`
         : '请先绑定智能体，再将输入内容作为当前内置频道的入站消息。'
@@ -605,7 +592,7 @@ export function ChannelConversationPage() {
                     <div
                       className={styles.composer}
                       data-channel-composer
-                      data-mode={channel.kind === 'web' ? 'web' : 'platform'}
+                      data-mode={channel.kind === 'internal' ? 'internal' : 'platform'}
                     >
                       <form onSubmit={(event) => void submit(event)}>
                         <Textarea
@@ -623,7 +610,7 @@ export function ChannelConversationPage() {
                           aria-describedby="channel-composer-mode"
                           rows={1}
                           placeholder={
-                            channel.kind === 'web'
+                            channel.kind === 'internal'
                               ? agent
                                 ? '输入消息'
                                 : '请先绑定智能体'
@@ -633,7 +620,7 @@ export function ChannelConversationPage() {
                                   ? '请先绑定智能体'
                                   : '当前连接不允许主动发言'
                           }
-                          disabled={sendPending || (channel.kind === 'web' ? !canSendOnWeb : !canSendAsRobot)}
+                          disabled={sendPending || (channel.kind === 'internal' ? !canSendOnWeb : !canSendAsRobot)}
                         />
                         <div className={styles.composerModeRow}>
                           <Tooltip.Root>
@@ -650,7 +637,7 @@ export function ChannelConversationPage() {
                           </Tooltip.Root>
                           <span className={styles.composerMode}>{composerMode}</span>
                           <span className={styles.composerModeSpacer} aria-hidden="true" />
-                          {channel.kind !== 'web' && webChannel ? (
+                          {channel.kind !== 'internal' && webChannel ? (
                             <Button
                               variant="ghost"
                               size="small"
@@ -661,12 +648,12 @@ export function ChannelConversationPage() {
                             </Button>
                           ) : null}
                           <IconButton
-                            label={channel.kind === 'web' ? '发送给智能体' : '发到频道'}
+                            label={channel.kind === 'internal' ? '发送给智能体' : '发到频道'}
                             className={styles.composerSend}
                             type="submit"
                             loading={sendPending}
                             loadingLabel="发送中…"
-                            disabled={!draft.trim() || (channel.kind === 'web' ? !canSendOnWeb : !canSendAsRobot)}
+                            disabled={!draft.trim() || (channel.kind === 'internal' ? !canSendOnWeb : !canSendAsRobot)}
                           >
                             <Send size={14} aria-hidden="true" />
                           </IconButton>
@@ -764,13 +751,13 @@ export function ChannelConversationPage() {
       <ConfirmDialog
         open={channelDeleteOpen}
         onOpenChange={setChannelDeleteOpen}
-        title={channel?.kind === 'web' ? '删除内置频道？' : '从 NekroNXT 移除此频道？'}
+        title={channel?.kind === 'internal' ? '删除内置频道？' : '从 NekroNXT 移除此频道？'}
         description={
-          channel?.kind === 'web'
+          channel?.kind === 'internal'
             ? '当前生成或工具调用会立即中止，频道会解除绑定并从列表中移除。历史消息、资源和审计事实可在记录中查询。'
             : '当前生成或工具调用会立即中止，频道会解除绑定并从列表中移除。再次收到消息时，频道会重新出现在列表中。'
         }
-        confirmLabel={channel?.kind === 'web' ? '删除内置频道' : '从 NekroNXT 移除'}
+        confirmLabel={channel?.kind === 'internal' ? '删除内置频道' : '从 NekroNXT 移除'}
         confirmVariant="danger"
         confirmLoadingLabel="正在移除…"
         confirmDisabled={!channel}

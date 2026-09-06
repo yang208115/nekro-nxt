@@ -5,6 +5,7 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import { sessionDir } from '@deepseek-ai/dsh-spill-local'
 import { AssetService, CoreService } from '@nekro-nxt/core'
 import { AdmissionIdSchema, EpisodeIdSchema } from '@nekro-nxt/contracts'
+import { AuthoringArtifactStore, DynamicAuthoringService } from '@nekro-nxt/extension-runtime'
 import { openMigratedCoreDatabase, SqliteCoreRepository } from '@nekro-nxt/storage-sqlite'
 import { mkdir, mkdtemp, readFile, rm, truncate, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -46,6 +47,15 @@ const textChunks = function* (text: string): Generator<StreamChunk> {
   yield { type: 'finish', reason: { kind: 'stop' } }
 }
 
+const toolResultText = (options: GenerateOptions): string =>
+  options.messages
+    .flatMap((message) => message.content)
+    .filter((block) => block.type === 'tool-result')
+    .flatMap((block) => block.content)
+    .filter((block) => block.type === 'text')
+    .map((block) => block.text)
+    .join('\n')
+
 const deferred = <T = void>(): { readonly promise: Promise<T>; readonly resolve: (value: T) => void } => {
   let resolve!: (value: T) => void
   const promise = new Promise<T>((settle) => {
@@ -60,6 +70,7 @@ class DelegationModel extends LlmAdapter {
   readonly initialChildFinished = deferred()
   readonly followupChildFinished = deferred()
   readonly childRequests: GenerateOptions[] = []
+  readonly rootRequestOptions: GenerateOptions[] = []
   rootRequests = 0
   followupChildId: string | undefined
   #delegated = false
@@ -86,6 +97,7 @@ class DelegationModel extends LlmAdapter {
   override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     const toolNames = new Set(options.tools?.map((tool) => tool.name) ?? [])
     if (toolNames.has('subagent')) {
+      this.rootRequestOptions.push(options)
       this.rootRequests += 1
       if (!this.#delegated) {
         this.#delegated = true
@@ -155,6 +167,223 @@ class WebSearchModel extends LlmAdapter {
   }
 }
 
+class DynamicDelegationModel extends LlmAdapter {
+  readonly childRequests: GenerateOptions[] = []
+  private rootDelegated = false
+  private childStep = 0
+  private pluginId: string | undefined
+  private packageId: string | undefined
+
+  override providerInfo(provider: string) {
+    return { id: provider, name: 'Dynamic delegation model' }
+  }
+
+  override listModels(provider: string) {
+    return Promise.resolve([{ provider, id: 'chat-model', name: 'Chat model', inputModalities: ['text'] as const }])
+  }
+
+  override resolveModel(provider: string, model: string) {
+    return Promise.resolve({
+      provider,
+      id: model,
+      name: model,
+      inputModalities: ['text'] as const,
+      context: { contextWindow: 128_000 },
+    })
+  }
+
+  override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    await Promise.resolve()
+    const toolNames = new Set(options.tools?.map(({ name }) => name) ?? [])
+    if (toolNames.has('subagent')) {
+      if (!this.rootDelegated) {
+        this.rootDelegated = true
+        yield* toolCallChunks('subagent', 'dynamic-delegate', {
+          description: '开发动态扩展',
+          prompt: '检查当前 Host 契约，创建、运行、检查、停止并修订一个动态 Host Tool。',
+          run_in_background: false,
+        })
+        return
+      }
+      yield* toolCallChunks('finish_channel_turn', 'dynamic-root-finish', {
+        outcome: 'response-complete',
+        reason: '子智能体已完成动态扩展验证。',
+      })
+      return
+    }
+
+    this.childRequests.push(options)
+    const resultText = toolResultText(options)
+    if (this.childStep === 0) {
+      this.childStep += 1
+      yield* toolCallChunks('cordis_inspect_query', 'dynamic-inspect-context', {
+        platform: 'host',
+        provider: 'nekro-nxt-runtime',
+        method: 'currentContext',
+        input: {},
+      })
+      return
+    }
+    if (this.childStep === 1) {
+      expect(resultText).toContain('dynamicCreation')
+      this.childStep += 1
+      yield* toolCallChunks('cordis_define', 'dynamic-define-v1', {
+        plugin: { kind: 'new', idPrefix: 'child' },
+        name: '子级动态探针一版',
+        purpose: '证明子智能体可以在根 Episode 创建工具。',
+        code: { host: this.toolPluginSource('child_dynamic_probe_v1') },
+      })
+      return
+    }
+    if (this.childStep === 2) {
+      const receipt = /Defined ([^/\s]+)\/([^\s]+) \(/u.exec(resultText)
+      if (!receipt) throw new Error(`Cannot parse dynamic receipt from: ${resultText}`)
+      this.pluginId = receipt[1]
+      this.packageId = receipt[2]
+      this.childStep += 1
+      yield* toolCallChunks('cordis_run', 'dynamic-run-v1', {
+        pluginId: this.pluginId,
+        packageId: this.packageId,
+        mode: 'run',
+      })
+      return
+    }
+    if (this.childStep === 3) {
+      expect(resultText).toContain('is running')
+      this.childStep += 1
+      yield* toolCallChunks('cordis_inspect_self', 'dynamic-inspect-v1', {
+        pluginId: this.pluginId,
+        packageId: this.packageId,
+      })
+      return
+    }
+    if (this.childStep === 4) {
+      expect(resultText).toContain('child_dynamic_probe_v1')
+      this.childStep += 1
+      yield* toolCallChunks('cordis_stop', 'dynamic-stop-v1', { pluginId: this.pluginId })
+      return
+    }
+    if (this.childStep === 5) {
+      expect(resultText).toContain('is stopped')
+      this.childStep += 1
+      yield* toolCallChunks('cordis_define', 'dynamic-define-v2', {
+        plugin: { kind: 'existing', pluginId: this.pluginId },
+        name: '子级动态探针二版',
+        purpose: '证明子智能体可以修订根 Episode 的同一 Plugin。',
+        code: { host: this.toolPluginSource('child_dynamic_probe_v2') },
+      })
+      return
+    }
+    if (this.childStep === 6) {
+      const receipt = [...resultText.matchAll(/Defined ([^/\s]+)\/([^\s]+) \(/gu)].at(-1)
+      if (!receipt || receipt[1] !== this.pluginId) throw new Error(`Cannot parse updated receipt from: ${resultText}`)
+      this.packageId = receipt[2]
+      this.childStep += 1
+      yield* toolCallChunks('cordis_run', 'dynamic-run-v2', {
+        pluginId: this.pluginId,
+        packageId: this.packageId,
+        mode: 'update',
+      })
+      return
+    }
+    if (this.childStep === 7) {
+      expect(resultText).toContain('is running')
+      this.childStep += 1
+      yield* toolCallChunks('cordis_inspect_self', 'dynamic-inspect-v2', {
+        pluginId: this.pluginId,
+        packageId: this.packageId,
+      })
+      return
+    }
+    expect(resultText).toContain('child_dynamic_probe_v2')
+    yield* textChunks('动态扩展已在根 Episode 完成修订和验证。')
+  }
+
+  private toolPluginSource(name: string): string {
+    return `return {
+      inject: ['tools'],
+      apply(ctx) {
+        const tool = harness.defineTool({
+          name: '${name}',
+          description: 'Child dynamic ownership probe',
+          parameters: {},
+          output: { schema: { type: 'string' }, render(_args, value) { return [{ type: 'text', text: value }] } },
+          execute() { return 'ok' }
+        })
+        harness.registerTool(ctx, tool)
+      }
+    }`
+  }
+}
+
+class DenylistRecoveryModel extends LlmAdapter {
+  readonly firstChildFinished = deferred()
+  readonly replacementChildFinished = deferred()
+  followupChildId: string | undefined
+  childRequests = 0
+  private initialStarted = false
+  private followupSent = false
+  private replacementStarted = false
+
+  override providerInfo(provider: string) {
+    return { id: provider, name: 'Denylist recovery model' }
+  }
+
+  override listModels(provider: string) {
+    return Promise.resolve([{ provider, id: 'chat-model', name: 'Chat model', inputModalities: ['text'] as const }])
+  }
+
+  override resolveModel(provider: string, model: string) {
+    return Promise.resolve({
+      provider,
+      id: model,
+      name: model,
+      inputModalities: ['text'] as const,
+      context: { contextWindow: 128_000 },
+    })
+  }
+
+  override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    await Promise.resolve()
+    const toolNames = new Set(options.tools?.map(({ name }) => name) ?? [])
+    if (!toolNames.has('subagent')) {
+      this.childRequests += 1
+      yield* textChunks(`子任务 ${this.childRequests} 完成。`)
+      if (this.childRequests === 1) this.firstChildFinished.resolve()
+      else this.replacementChildFinished.resolve()
+      return
+    }
+    if (!this.initialStarted) {
+      this.initialStarted = true
+      yield* toolCallChunks('subagent', 'denylist-initial', {
+        description: '建立可恢复子级',
+        prompt: '返回一句完成说明。',
+      })
+      return
+    }
+    if (this.followupChildId !== undefined && !this.followupSent) {
+      this.followupSent = true
+      yield* toolCallChunks('send_message', 'denylist-followup', {
+        subagent_id: this.followupChildId,
+        message: '在频道动作能力变化后继续。',
+      })
+      return
+    }
+    if (this.followupSent && !this.replacementStarted) {
+      this.replacementStarted = true
+      yield* toolCallChunks('subagent', 'denylist-replacement', {
+        description: '替换不可恢复子级',
+        prompt: '建立新的子智能体并返回一句完成说明。',
+      })
+      return
+    }
+    yield* toolCallChunks('finish_channel_turn', 'denylist-finish', {
+      outcome: 'response-complete',
+      reason: '子智能体恢复策略已验证。',
+    })
+  }
+}
+
 describe('DSH 0.1.1-rc.2 official capability composition', () => {
   it('caps DeepSeek search cost and results while keeping external text inside the tool result', async () => {
     const directory = await mkdtemp(path.join(tmpdir(), 'nekro-nxt-dsh-web-search-'))
@@ -170,8 +399,8 @@ describe('DSH 0.1.1-rc.2 official capability composition', () => {
       model: { provider: 'test-provider', model: 'chat-model' },
       capabilities: { webSearch: true },
     })
-    const connection = core.createConnection({ adapterKey: 'web', config: {} })
-    const channel = core.createChannel({ connectionId: connection.id, platformChannelId: 'search', kind: 'web' })
+    const connection = core.createConnection({ adapterKey: 'fixture-alpha', config: {} })
+    const channel = core.createChannel({ connectionId: connection.id, platformChannelId: 'search', kind: 'internal' })
     const model = new WebSearchModel()
     const settingsPath = path.join(directory, 'dsh', 'settings.yaml')
     const credentialPath = path.join(directory, 'dsh', 'credentials.yaml')
@@ -228,7 +457,7 @@ describe('DSH 0.1.1-rc.2 official capability composition', () => {
       const event = core.appendInbound({
         connectionId: connection.id,
         channelId: channel.id,
-        adapterKey: 'web',
+        adapterKey: 'fixture-alpha',
         platformEventId: 'search-event',
         kind: 'message-created',
         parts: [{ type: 'text', text: '搜索资料。' }],
@@ -316,33 +545,44 @@ describe('DSH 0.1.1-rc.2 official capability composition', () => {
     const core = new CoreService(repository, { now: () => 1000 + id, nextUlid: () => `D${++id}` })
     const definition = core.createAgent({
       displayName: '委派智能体',
-      persona: '',
+      persona: '完整继承人设：只报告已经核验的事实。',
       model: { provider: 'test-provider', model: 'chat-model' },
-      capabilities: { subagents: true },
+      capabilities: {
+        subagents: true,
+        webSearch: true,
+        dynamicCreation: true,
+        fileTools: true,
+        developmentShell: true,
+        unrestrictedFileAccess: true,
+      },
     })
     const deniedDefinition = core.createAgent({
       displayName: '不委派智能体',
       persona: '',
       model: { provider: 'test-provider', model: 'chat-model' },
     })
-    const connection = core.createConnection({ adapterKey: 'web', config: {} })
-    const channel = core.createChannel({ connectionId: connection.id, platformChannelId: 'delegation', kind: 'web' })
+    const connection = core.createConnection({ adapterKey: 'fixture-alpha', config: {} })
+    const channel = core.createChannel({
+      connectionId: connection.id,
+      platformChannelId: 'delegation',
+      kind: 'internal',
+    })
     const siblingChannel = core.createChannel({
       connectionId: connection.id,
       platformChannelId: 'delegation-sibling',
-      kind: 'web',
+      kind: 'internal',
     })
     const deniedChannel = core.createChannel({
       connectionId: connection.id,
       platformChannelId: 'delegation-denied',
-      kind: 'web',
+      kind: 'internal',
     })
     let eventId = 0
     const appendEvent = (text: string) =>
       core.appendInbound({
         connectionId: connection.id,
         channelId: channel.id,
-        adapterKey: 'web',
+        adapterKey: 'fixture-alpha',
         platformEventId: `event-${++eventId}`,
         kind: 'message-created',
         parts: [{ type: 'text', text }],
@@ -351,10 +591,18 @@ describe('DSH 0.1.1-rc.2 official capability composition', () => {
         dedupeKey: `event:${eventId}`,
       }).event
     const model = new DelegationModel()
+    let supportsActions = false
     const createHost = () =>
       DshHostRuntime.create({
         sessionDatabasePath: path.join(directory, 'sessions.sqlite'),
-        communication: { sendMessage: () => Promise.reject(new Error('not used')) },
+        developmentWorkspaceRoot: path.join(directory, 'workspaces'),
+        communication: {
+          sendMessage: () => Promise.reject(new Error('not used')),
+          supportsRetraction: () => supportsActions,
+          supportsNudge: () => supportsActions,
+          retractMessage: () => Promise.reject(new Error('not used')),
+          nudgeMember: () => Promise.reject(new Error('not used')),
+        },
         history: repository,
         assets: repository,
         assetService,
@@ -388,6 +636,9 @@ describe('DSH 0.1.1-rc.2 official capability composition', () => {
       expect(host.toolNames(sessionId)).toEqual(
         expect.arrayContaining(['subagent', 'send_message', 'interrupt_agent', 'list_agents']),
       )
+      expect(host.toolNames(sessionId)).not.toEqual(
+        expect.arrayContaining(['retract_channel_message', 'nudge_channel_member']),
+      )
       expect(host.toolNames(deniedSessionId)).not.toEqual(
         expect.arrayContaining(['subagent', 'send_message', 'interrupt_agent', 'list_agents']),
       )
@@ -413,18 +664,45 @@ describe('DSH 0.1.1-rc.2 official capability composition', () => {
       expect(model.childRequests).toHaveLength(1)
       expect(model.childRequests[0]?.maxTokens).toBe(4096)
       const childToolNames = model.childRequests[0]?.tools?.map((tool) => tool.name) ?? []
-      expect(childToolNames).toContain('report')
+      expect(childToolNames).toEqual(
+        expect.arrayContaining([
+          'report',
+          'nekro_nxt_channel_context',
+          'conversation_history_read',
+          'conversation_history_search',
+          'asset_create',
+          'asset_inspect',
+          'web_search',
+          'bash',
+          'read',
+          'write',
+          'edit',
+          'skill',
+          'cordis_inspect_query',
+          'cordis_define',
+          'nekro_nxt_extension_define',
+          'cordis_run',
+        ]),
+      )
       expect(childToolNames).not.toEqual(
         expect.arrayContaining([
           'send_channel_message',
+          'finish_channel_turn',
+          'retract_channel_message',
+          'nudge_channel_member',
           'subagent',
           'send_message',
-          'bash',
-          'web_search',
-          'cordis_define',
-          'nekro_nxt_extension_define',
+          'interrupt_agent',
+          'list_agents',
         ]),
       )
+      expect(model.rootRequestOptions[0]?.system).toContain('上下文管理：当前频道对话')
+      expect(model.rootRequestOptions[0]?.system).toContain('只有成功调用 **send_channel_message**')
+      expect(model.childRequests[0]?.system).toContain('完整继承人设：只报告已经核验的事实。')
+      expect(model.childRequests[0]?.system).toContain('你是主智能体委派的子智能体')
+      expect(model.childRequests[0]?.system).not.toContain('上下文管理：当前频道对话')
+      expect(model.childRequests[0]?.system).not.toContain('只有成功调用 **send_channel_message**')
+      expect(JSON.stringify(model.childRequests[0]?.messages)).not.toContain('启动后台子任务。')
 
       const liveChildren = await host.listSubagents(sessionId)
       expect(liveChildren).toEqual([
@@ -435,6 +713,7 @@ describe('DSH 0.1.1-rc.2 official capability composition', () => {
       await model.initialChildFinished.promise
       await host.dispose()
 
+      supportsActions = true
       host = await createHost()
       await host.createSession({
         episodeId,
@@ -460,12 +739,228 @@ describe('DSH 0.1.1-rc.2 official capability composition', () => {
       await host.whenIdle(sessionId)
       expect(model.childRequests).toHaveLength(2)
       expect(model.childRequests[1]?.maxTokens).toBe(4096)
+      expect(host.toolNames(sessionId)).toEqual(
+        expect.arrayContaining(['retract_channel_message', 'nudge_channel_member']),
+      )
+      expect(model.childRequests[1]?.tools?.map(({ name }) => name)).not.toEqual(
+        expect.arrayContaining(['retract_channel_message', 'nudge_channel_member']),
+      )
     } finally {
       model.initialChildGate.resolve()
       await host.dispose()
       database.close()
     }
   })
+
+  it('lets a foreground child inspect and revise dynamic Cordis state owned by the root Episode', async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'nekro-nxt-dsh-child-dynamic-'))
+    temporaryDirectories.push(directory)
+    const database = await openMigratedCoreDatabase(path.join(directory, 'core.sqlite'))
+    const repository = new SqliteCoreRepository(database)
+    const assetService = new AssetService(repository, path.join(directory, 'assets'))
+    let id = 0
+    const core = new CoreService(repository, { now: () => 2000 + id, nextUlid: () => `C${++id}` })
+    const definition = core.createAgent({
+      displayName: '动态委派智能体',
+      persona: '先检查真实契约，再修改扩展。',
+      model: { provider: 'test-provider', model: 'chat-model' },
+      capabilities: { subagents: true, dynamicCreation: true },
+    })
+    const connection = core.createConnection({ adapterKey: 'fixture-alpha', config: {} })
+    const channel = core.createChannel({
+      connectionId: connection.id,
+      platformChannelId: 'child-dynamic',
+      kind: 'internal',
+    })
+    const model = new DynamicDelegationModel()
+    const episodeId = EpisodeIdSchema.parse('eps_CHILDDYNAMIC')
+    const sessionId = SessionId(`nxt-${episodeId}`)
+    const event = core.appendInbound({
+      connectionId: connection.id,
+      channelId: channel.id,
+      adapterKey: 'fixture-alpha',
+      platformEventId: 'child-dynamic-event',
+      kind: 'message-created',
+      parts: [{ type: 'text', text: '委派开发一个动态工具。' }],
+      platformTimestamp: 2001,
+      receivedAt: 2001,
+      dedupeKey: 'child-dynamic-event',
+    }).event
+    repository.createEpisode({
+      id: episodeId,
+      channelId: channel.id,
+      agentId: definition.definition.id,
+      agentRevisionId: definition.revision.id,
+      status: 'opening',
+      openedAtEventId: event.id,
+      createdAt: 2002,
+    })
+    const authoring = new DynamicAuthoringService(
+      repository,
+      new AuthoringArtifactStore(path.join(directory, 'workspaces')),
+    )
+    const host = await DshHostRuntime.create({
+      sessionDatabasePath: path.join(directory, 'sessions.sqlite'),
+      communication: { sendMessage: () => Promise.reject(new Error('not used')) },
+      history: repository,
+      assets: repository,
+      assetService,
+      resolveAgentRevision: (revisionId) => repository.getAgentRevision(revisionId),
+      authoring: { service: authoring, resolveInitiatingEvent: () => event.id },
+      configureLlm: (context: Context) => {
+        context.llm.registerAdapter(['test-provider'], model)
+      },
+    })
+    try {
+      await host.createSession({
+        episodeId,
+        channelId: channel.id,
+        agentId: definition.definition.id,
+        agentRevisionId: definition.revision.id,
+      })
+      await host.admit({
+        dshSessionId: sessionId,
+        admissionId: AdmissionIdSchema.parse('adm_CHILDDYNAMIC'),
+        events: [event],
+        mode: 'followup',
+        replyRequired: true,
+      })
+      await host.whenIdle(sessionId)
+
+      expect(model.childRequests).toHaveLength(9)
+      expect(model.childRequests.at(-1)?.tools?.map(({ name }) => name)).toContain('child_dynamic_probe_v2')
+      expect(model.childRequests.at(-1)?.tools?.map(({ name }) => name)).not.toContain('child_dynamic_probe_v1')
+      const inventory = host.dynamicInventory(sessionId)
+      expect(inventory).toHaveLength(1)
+      expect(inventory[0]).toMatchObject({ agentId: sessionId })
+      expect(inventory[0]?.packages).toHaveLength(2)
+      expect(inventory[0]?.latestRun).toMatchObject({ status: 'running' })
+      expect(host.toolNames(sessionId)).toContain('child_dynamic_probe_v2')
+      const task = authoring.taskForRunner(episodeId, inventory[0]!.pluginId)
+      expect(task).toMatchObject({
+        agentId: definition.definition.id,
+        channelId: channel.id,
+        episodeId,
+        initiatingEventId: event.id,
+        status: 'ready',
+      })
+      const attempts = repository.listAuthoringAttempts(task!.id)
+      expect(attempts).toHaveLength(2)
+      expect(attempts.at(-1)).toMatchObject({
+        runnerPluginId: inventory[0]!.pluginId,
+        runnerPackageId: inventory[0]!.latestRun?.packageId,
+        state: 'active',
+        verification: {
+          hostStarted: true,
+          toolInvocations: [{ name: 'child_dynamic_probe_v2', succeeded: true }],
+        },
+      })
+      expect(repository.listAuthoringEvents(task!.id).map(({ kind }) => kind)).toContain('verification-completed')
+    } finally {
+      await host.dispose()
+      database.close()
+    }
+  }, 15_000)
+
+  it('fails closed when a persisted child denylist names a channel action removed after restart', async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'nekro-nxt-dsh-denylist-recovery-'))
+    temporaryDirectories.push(directory)
+    const database = await openMigratedCoreDatabase(path.join(directory, 'core.sqlite'))
+    const repository = new SqliteCoreRepository(database)
+    const assetService = new AssetService(repository, path.join(directory, 'assets'))
+    let id = 0
+    const core = new CoreService(repository, { now: () => 3000 + id, nextUlid: () => `R${++id}` })
+    const definition = core.createAgent({
+      displayName: '恢复边界智能体',
+      persona: '',
+      model: { provider: 'test-provider', model: 'chat-model' },
+      capabilities: { subagents: true },
+    })
+    const connection = core.createConnection({ adapterKey: 'fixture-alpha', config: {} })
+    const channel = core.createChannel({ connectionId: connection.id, platformChannelId: 'denylist', kind: 'internal' })
+    const model = new DenylistRecoveryModel()
+    let supportsActions = true
+    const createHost = () =>
+      DshHostRuntime.create({
+        sessionDatabasePath: path.join(directory, 'sessions.sqlite'),
+        communication: {
+          sendMessage: () => Promise.reject(new Error('not used')),
+          supportsRetraction: () => supportsActions,
+          supportsNudge: () => supportsActions,
+          retractMessage: () => Promise.reject(new Error('not used')),
+          nudgeMember: () => Promise.reject(new Error('not used')),
+        },
+        history: repository,
+        assets: repository,
+        assetService,
+        resolveAgentRevision: (revisionId) => repository.getAgentRevision(revisionId),
+        configureLlm: (context: Context) => {
+          context.llm.registerAdapter(['test-provider'], model)
+        },
+      })
+    const appendEvent = (suffix: string, text: string) =>
+      core.appendInbound({
+        connectionId: connection.id,
+        channelId: channel.id,
+        adapterKey: 'fixture-alpha',
+        platformEventId: `denylist-${suffix}`,
+        kind: 'message-created',
+        parts: [{ type: 'text', text }],
+        platformTimestamp: 3000 + id,
+        receivedAt: 3000 + id,
+        dedupeKey: `denylist-${suffix}`,
+      }).event
+    const episodeId = EpisodeIdSchema.parse('eps_DENYLISTRECOVERY')
+    const sessionId = SessionId(`nxt-${episodeId}`)
+    let host = await createHost()
+    try {
+      await host.createSession({
+        episodeId,
+        channelId: channel.id,
+        agentId: definition.definition.id,
+        agentRevisionId: definition.revision.id,
+      })
+      await host.admit({
+        dshSessionId: sessionId,
+        admissionId: AdmissionIdSchema.parse('adm_DENYLISTINITIAL'),
+        events: [appendEvent('initial', '创建一个后台子任务。')],
+        mode: 'followup',
+        replyRequired: true,
+      })
+      await model.firstChildFinished.promise
+      await host.whenIdle(sessionId)
+      const child = (await host.listSubagents(sessionId))[0]
+      if (child?.kind !== 'child') throw new Error('Expected the initial continuable child.')
+      model.followupChildId = child.id
+      await host.dispose()
+
+      supportsActions = false
+      host = await createHost()
+      await host.createSession({
+        episodeId,
+        channelId: channel.id,
+        agentId: definition.definition.id,
+        agentRevisionId: definition.revision.id,
+      })
+      await host.admit({
+        dshSessionId: sessionId,
+        admissionId: AdmissionIdSchema.parse('adm_DENYLISTFOLLOWUP'),
+        events: [appendEvent('followup', '继续并在失败时创建新的子智能体。')],
+        mode: 'followup',
+        replyRequired: true,
+      })
+      await model.replacementChildFinished.promise
+      await host.whenIdle(sessionId)
+
+      expect(model.childRequests).toBe(2)
+      expect(JSON.stringify(host.sessionEvents(sessionId))).toContain('NOT_RESUMABLE')
+      expect(JSON.stringify(host.sessionEvents(sessionId))).toContain(`subagent \\"${child.id}\\" is unavailable`)
+      expect(await host.listSubagents(sessionId)).toHaveLength(2)
+    } finally {
+      await host.dispose()
+      database.close()
+    }
+  }, 15_000)
 
   it('persists spill artifacts and rejects artifact, session and Host quota overflow', async () => {
     const directory = await mkdtemp(path.join(tmpdir(), 'nekro-nxt-dsh-spill-'))

@@ -97,6 +97,8 @@ declare const styles: {
   readonly composerModeSpacer: string
   readonly composerSend: string
   readonly composerWebAction: string
+  readonly connectionActivityBody: string
+  readonly connectionActivityList: string
   readonly connectionAliasEditor: string
   readonly connectionNavItem: string
   readonly connectionNavItemActive: string

@@ -65,6 +65,7 @@ describe('persona reference compiler', () => {
           alias: '主账号',
           config: {},
           credentialRefs: {},
+          activityTriggerDefaults: [],
           createdAt: 1,
         }),
         getPlatformIdentity: () => ({
@@ -110,7 +111,7 @@ describe('persona reference compiler', () => {
         channel: {
           channelId: ChannelIdSchema.parse('chn_plain'),
           connectionId: ConnectionIdSchema.parse('con_plain'),
-          kind: 'web',
+          kind: 'internal',
           episodeId: EpisodeIdSchema.parse('eps_plain'),
         },
         repository: { getChannel: () => undefined },

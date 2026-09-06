@@ -5,11 +5,12 @@ import type {
   AdapterDeliveryReceipt,
   AdapterInteractionOutcome,
   AdapterPhysicalPlan,
+  AdapterRuntimeCapabilities,
   PhysicalDeliveryRequest,
 } from '@nekro-nxt/adapter-sdk'
 import type {
   AssetId,
-  ChannelActivityType,
+  AdapterActivityKey,
   ChannelId,
   ConnectionId,
   JsonValue,
@@ -18,7 +19,12 @@ import type {
 } from '@nekro-nxt/contracts'
 import { ChannelIdSchema, LogicalMessageIdSchema } from '@nekro-nxt/contracts'
 import { createDecipheriv, createHash, randomUUID } from 'node:crypto'
-import { WECOM_AI_BOT_ADAPTER_KEY, WECOM_AI_BOT_CAPABILITIES, type WeComAiBotRuntimeConfig } from './definition.js'
+import {
+  WECOM_AI_BOT_ADAPTER_KEY,
+  WECOM_AI_BOT_CAPABILITIES,
+  WECOM_AI_BOT_CONNECTION_DEFINITION,
+  type WeComAiBotRuntimeConfig,
+} from './definition.js'
 import { WeComTransportError, WeComWebSocketClient, type WeComObject, weComObject } from './transport.js'
 
 const CALLBACK_TTL_MS = 24 * 60 * 60 * 1_000
@@ -202,7 +208,16 @@ const interactionOutcome = (error: unknown): AdapterInteractionOutcome => {
 
 /** Official enterprise WeChat AI bot long-connection mapping. */
 export class WeComAiBotRuntime implements AdapterConnectionRuntime {
-  readonly capabilities = WECOM_AI_BOT_CAPABILITIES
+  readonly capabilities: AdapterRuntimeCapabilities = {
+    outbound: WECOM_AI_BOT_CAPABILITIES,
+    activities: Object.fromEntries(
+      WECOM_AI_BOT_CONNECTION_DEFINITION.descriptor.activities.map((activity) => [
+        activity.key,
+        { state: 'available' },
+      ]),
+    ),
+    processingFeedback: { state: 'available' },
+  }
   readonly interactions: AdapterConnectionInteractions
   readonly #context: AdapterConnectionHostContext
   readonly #config: WeComAiBotRuntimeConfig
@@ -265,7 +280,7 @@ export class WeComAiBotRuntime implements AdapterConnectionRuntime {
     readonly replyTo?: string
     readonly origin?: {
       readonly platformMessageId?: string
-      readonly activityType?: ChannelActivityType
+      readonly activityKey?: AdapterActivityKey
       readonly receivedAt: number
     }
     readonly processingFeedback?: { readonly leaseId: string; readonly platformMessageId: string }
@@ -278,7 +293,7 @@ export class WeComAiBotRuntime implements AdapterConnectionRuntime {
     }
     const plans: AdapterPhysicalPlan[] = []
     let feedbackAvailable = input.processingFeedback !== undefined
-    let welcomeAvailable = input.origin?.activityType === 'conversation-entered'
+    let welcomeAvailable = input.origin?.activityKey === 'conversation-entered'
     for (const part of input.parts) {
       if (part.type === 'text') {
         const chunks = splitWeComMarkdown(part.text)
@@ -458,7 +473,7 @@ export class WeComAiBotRuntime implements AdapterConnectionRuntime {
     const senderMemberId = await this.#context.members.ensure({ channelId, platformUserId: senderId, observedAt: now })
     this.#callbacks.set(msgId, { reqId, channelId, receivedAt: now })
     const decoded = await this.#decodeMessage(body)
-    await this.#context.acceptInbound({
+    await this.#context.acceptChannelInbound({
       connectionId: this.#context.connectionId,
       channelId,
       adapterKey: WECOM_AI_BOT_ADAPTER_KEY,
@@ -495,14 +510,14 @@ export class WeComAiBotRuntime implements AdapterConnectionRuntime {
     this.#callbacks.set(msgId, { reqId, channelId, receivedAt: now })
     const mapped = await this.#mapEvent(eventType, event!, channelId)
     if (!mapped) return
-    await this.#context.acceptInbound({
+    await this.#context.acceptChannelInbound({
       connectionId: this.#context.connectionId,
       channelId,
       adapterKey: WECOM_AI_BOT_ADAPTER_KEY,
       platformEventId: `event:${msgId}`,
       platformMessageId: msgId,
       kind: 'control',
-      activityType: mapped.activityType,
+      activityKey: mapped.activityKey,
       senderMemberId,
       parts: mapped.parts,
       platformTimestamp: timestamp(body['create_time'], now),
@@ -519,7 +534,7 @@ export class WeComAiBotRuntime implements AdapterConnectionRuntime {
     channelId: ChannelId,
   ): Promise<
     | {
-        readonly activityType: ChannelActivityType
+        readonly activityKey: AdapterActivityKey
         readonly parts: MessagePart[]
         readonly targetLogicalMessageId?: LogicalMessageId
         readonly facts?: Readonly<Record<string, JsonValue>>
@@ -528,7 +543,7 @@ export class WeComAiBotRuntime implements AdapterConnectionRuntime {
   > {
     if (eventType === 'enter_chat') {
       return {
-        activityType: 'conversation-entered',
+        activityKey: 'conversation-entered',
         parts: [this.#rich('conversation-entered', '成员进入了机器人会话。')],
       }
     }
@@ -541,7 +556,7 @@ export class WeComAiBotRuntime implements AdapterConnectionRuntime {
       const selection = event['selected_items'] ?? event['selected_options']
       if (selection !== undefined) facts['selectionSummary'] = truncate(JSON.stringify(selection), 500)
       return {
-        activityType: 'card-action-invoked',
+        activityKey: 'card-action-invoked',
         parts: [this.#rich('card-action', eventKey ? `触发了卡片操作：${truncate(eventKey, 80)}` : '触发了卡片操作。')],
         ...(Object.keys(facts).length === 0 ? {} : { facts }),
       }
@@ -549,7 +564,7 @@ export class WeComAiBotRuntime implements AdapterConnectionRuntime {
     if (eventType !== 'feedback_event') return undefined
     const feedback = object(event['feedback_event']) ?? object(event['feedback']) ?? event
     const feedbackType = number(feedback['type'])
-    const activityType =
+    const activityKey =
       feedbackType === 1
         ? 'message-feedback-positive'
         : feedbackType === 2
@@ -557,7 +572,7 @@ export class WeComAiBotRuntime implements AdapterConnectionRuntime {
           : feedbackType === 3
             ? 'message-feedback-withdrawn'
             : undefined
-    if (!activityType) return undefined
+    if (!activityKey) return undefined
     const feedbackId = string(feedback['id'])
     const targetLogicalMessageId = feedbackId ? await this.#resolveFeedbackTarget(channelId, feedbackId) : undefined
     const content = string(feedback['content'])
@@ -571,15 +586,15 @@ export class WeComAiBotRuntime implements AdapterConnectionRuntime {
         .slice(0, 10)
     }
     return {
-      activityType,
+      activityKey,
       parts: [
         this.#rich(
           'message-feedback',
           content
             ? `成员提交了消息反馈：${truncate(content, 300)}`
-            : activityType === 'message-feedback-positive'
+            : activityKey === 'message-feedback-positive'
               ? '成员提交了正向反馈。'
-              : activityType === 'message-feedback-negative'
+              : activityKey === 'message-feedback-negative'
                 ? '成员提交了负向反馈。'
                 : '成员撤销了消息反馈。',
         ),

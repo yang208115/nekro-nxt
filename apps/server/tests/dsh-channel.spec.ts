@@ -10,7 +10,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { AttachmentId } from '@deepseek-ai/dsh-attachment'
 import ToolResultPruner from '@deepseek-ai/dsh-compaction-tool-result-pruner'
 import TokenMeter from '@deepseek-ai/dsh-token-meter'
-import { createWebAdapterConnection } from '@nekro-nxt/adapter-web'
+import { createFakeLocalChannelConnection } from '@nekro-nxt/test-harness'
 import { ChannelRuntime } from '@nekro-nxt/channel-runtime'
 import { AssetService, CoreService, type AssetRecord } from '@nekro-nxt/core'
 import {
@@ -603,7 +603,7 @@ class InvalidImageInspectionProbeModel extends ScriptedCommunicationModel {
   }
 }
 
-describe('DSH Host and Web Channel vertical slice', () => {
+describe('DSH Host and internal Channel vertical slice', () => {
   it('supports multi-stage sends, enforces two reply corrections, and projects protocol failure after a third miss', async () => {
     const runScenario = async (
       model: ScriptedCommunicationModel,
@@ -623,16 +623,16 @@ describe('DSH Host and Web Channel vertical slice', () => {
         persona,
         model: { provider: 'test-provider', model: 'chat-model' },
       })
-      const connection = core.createConnection({ adapterKey: 'web', config: {} })
+      const connection = core.createConnection({ adapterKey: 'fixture-alpha', config: {} })
       const channel = core.createChannel({
         connectionId: connection.id,
         platformChannelId: `reply-guard-${suffix}`,
-        kind: 'web',
+        kind: 'internal',
       })
       const inbound = core.appendInbound({
         connectionId: connection.id,
         channelId: channel.id,
-        adapterKey: 'web',
+        adapterKey: 'fixture-alpha',
         platformEventId: `reply-guard-${suffix}`,
         kind: 'message-created',
         parts: [{ type: 'text', text: '请回复这条测试消息。' }],
@@ -942,17 +942,17 @@ describe('DSH Host and Web Channel vertical slice', () => {
       persona: '',
       model: { provider: 'test-provider', model: 'chat-model' },
     })
-    const connection = core.createConnection({ adapterKey: 'web', config: {} })
+    const connection = core.createConnection({ adapterKey: 'fixture-alpha', config: {} })
     const channel = core.createChannel({
       connectionId: connection.id,
       platformChannelId: 'late-obligation',
-      kind: 'web',
+      kind: 'internal',
     })
     const appendEvent = (suffix: string, text: string) =>
       core.appendInbound({
         connectionId: connection.id,
         channelId: channel.id,
-        adapterKey: 'web',
+        adapterKey: 'fixture-alpha',
         platformEventId: `late-${suffix}`,
         kind: 'message-created',
         parts: [{ type: 'text', text }],
@@ -1108,12 +1108,12 @@ describe('DSH Host and Web Channel vertical slice', () => {
       persona: '',
       model: { provider: 'test-provider', model: 'chat-model' },
     })
-    const connection = core.createConnection({ adapterKey: 'web', config: {} })
-    const channel = core.createChannel({ connectionId: connection.id, platformChannelId: 'pending', kind: 'web' })
+    const connection = core.createConnection({ adapterKey: 'fixture-alpha', config: {} })
+    const channel = core.createChannel({ connectionId: connection.id, platformChannelId: 'pending', kind: 'internal' })
     const event = core.appendInbound({
       connectionId: connection.id,
       channelId: channel.id,
-      adapterKey: 'web',
+      adapterKey: 'fixture-alpha',
       platformEventId: 'pending-event',
       kind: 'message-created',
       parts: [{ type: 'text', text: '待恢复消息' }],
@@ -1194,11 +1194,17 @@ describe('DSH Host and Web Channel vertical slice', () => {
       persona: '',
       model: { provider: 'test-provider', model: 'chat-model' },
     })
-    const connection = core.createConnection({ adapterKey: 'web', config: {} })
-    const channel = core.createChannel({ connectionId: connection.id, platformChannelId: 'activation', kind: 'web' })
+    const connection = core.createConnection({ adapterKey: 'fixture-alpha', config: {} })
+    const channel = core.createChannel({
+      connectionId: connection.id,
+      platformChannelId: 'activation',
+      kind: 'internal',
+    })
     core.createBinding({ channelId: channel.id, agentId: agent.definition.id, triggerPolicy: 'always' })
     const runtimeRef: { current?: ChannelRuntime } = {}
-    const web = createWebAdapterConnection(connection.id, (event) => runtimeRef.current!.acceptInbound(event))
+    const web = createFakeLocalChannelConnection(connection.id, (event) =>
+      runtimeRef.current!.acceptChannelInbound(event),
+    )
     const model = new ScriptedCommunicationModel()
     const host = await DshHostRuntime.create({
       sessionDatabasePath: path.join(directory, 'sessions.sqlite'),
@@ -1302,16 +1308,16 @@ describe('DSH Host and Web Channel vertical slice', () => {
       persona: '',
       model: { provider: 'test-provider', model: 'chat-model' },
     })
-    const connection = core.createConnection({ adapterKey: 'web', config: {} })
+    const connection = core.createConnection({ adapterKey: 'fixture-alpha', config: {} })
     const enabledChannel = core.createChannel({
       connectionId: connection.id,
       platformChannelId: 'creation-enabled',
-      kind: 'web',
+      kind: 'internal',
     })
     const deniedChannel = core.createChannel({
       connectionId: connection.id,
       platformChannelId: 'creation-denied',
-      kind: 'web',
+      kind: 'internal',
     })
     const model = new ToolSchemaProbeModel()
     const host = await DshHostRuntime.create({
@@ -1346,7 +1352,7 @@ describe('DSH Host and Web Channel vertical slice', () => {
         core.appendInbound({
           connectionId: connection.id,
           channelId,
-          adapterKey: 'web',
+          adapterKey: 'fixture-alpha',
           platformEventId: `dynamic-model-${++modelEventId}`,
           kind: 'message-created',
           parts: [{ type: 'text', text }],
@@ -1737,16 +1743,16 @@ describe('DSH Host and Web Channel vertical slice', () => {
       model: { provider: 'test-provider', model: 'chat-model' },
       capabilities: { dynamicCreation: true },
     })
-    const connection = core.createConnection({ adapterKey: 'web', config: {} })
+    const connection = core.createConnection({ adapterKey: 'fixture-alpha', config: {} })
     const channel = core.createChannel({
       connectionId: connection.id,
       platformChannelId: 'authoring-delete',
-      kind: 'web',
+      kind: 'internal',
     })
     const initiatingEventId = core.appendInbound({
       connectionId: connection.id,
       channelId: channel.id,
-      adapterKey: 'web',
+      adapterKey: 'fixture-alpha',
       platformEventId: 'authoring-delete-open',
       kind: 'message-created',
       parts: [{ type: 'text', text: '创建一个删除生命周期探针。' }],
@@ -1870,12 +1876,12 @@ describe('DSH Host and Web Channel vertical slice', () => {
         capabilities: { fileTools: true, developmentShell: true, unrestrictedFileAccess: true },
       }),
     ]
-    const connection = core.createConnection({ adapterKey: 'web', config: {} })
+    const connection = core.createConnection({ adapterKey: 'fixture-alpha', config: {} })
     const channels = definitions.map((_, index) =>
       core.createChannel({
         connectionId: connection.id,
         platformChannelId: `capability-${index}`,
-        kind: 'web',
+        kind: 'internal',
       }),
     )
     const workspaceRoot = path.join(directory, 'workspaces')
@@ -1951,11 +1957,11 @@ describe('DSH Host and Web Channel vertical slice', () => {
       persona: '你应当简洁、准确地回应频道消息。',
       model: { provider: 'test-provider', model: 'chat-model' },
     })
-    const connection = core.createConnection({ adapterKey: 'web', config: {} })
+    const connection = core.createConnection({ adapterKey: 'fixture-alpha', config: {} })
     const channel = core.createChannel({
       connectionId: connection.id,
       platformChannelId: 'main',
-      kind: 'web',
+      kind: 'internal',
       displayName: '主测试频道',
     })
     const sender = core.observeChannelMember({
@@ -1993,7 +1999,7 @@ describe('DSH Host and Web Channel vertical slice', () => {
     const staleEvent = core.appendInbound({
       connectionId: connection.id,
       channelId: channel.id,
-      adapterKey: 'web',
+      adapterKey: 'fixture-alpha',
       platformEventId: 'stale-channel-event',
       kind: 'message-created',
       parts: [{ type: 'text', text: '同频道但未准入旧 Episode 的内容' }],
@@ -2004,7 +2010,7 @@ describe('DSH Host and Web Channel vertical slice', () => {
     const quotedEvent = core.appendInbound({
       connectionId: connection.id,
       channelId: channel.id,
-      adapterKey: 'web',
+      adapterKey: 'fixture-alpha',
       platformEventId: 'quoted-channel-event',
       kind: 'message-created',
       senderMemberId: sender.id,
@@ -2024,13 +2030,13 @@ describe('DSH Host and Web Channel vertical slice', () => {
     const otherChannel = core.createChannel({
       connectionId: connection.id,
       platformChannelId: 'other',
-      kind: 'web',
+      kind: 'internal',
       displayName: '另一个测试频道',
     })
     const otherChannelEvent = core.appendInbound({
       connectionId: connection.id,
       channelId: otherChannel.id,
-      adapterKey: 'web',
+      adapterKey: 'fixture-alpha',
       platformEventId: 'other-channel-event',
       kind: 'message-created',
       parts: [{ type: 'text', text: '另一个频道的秘密内容' }],
@@ -2040,9 +2046,9 @@ describe('DSH Host and Web Channel vertical slice', () => {
     }).event
 
     const runtimeRef: { current?: ChannelRuntime } = {}
-    const web = createWebAdapterConnection(connection.id, (event) => {
+    const web = createFakeLocalChannelConnection(connection.id, (event) => {
       if (!runtimeRef.current) return Promise.reject(new Error('Channel Runtime is not ready.'))
-      return runtimeRef.current.acceptInbound(event)
+      return runtimeRef.current.acceptChannelInbound(event)
     })
     const createHost = (hostModel: ScriptedCommunicationModel) =>
       DshHostRuntime.create({
@@ -2077,10 +2083,10 @@ describe('DSH Host and Web Channel vertical slice', () => {
 
     try {
       await web.start()
-      const browserCommit = await runtime.acceptInbound({
+      const browserCommit = await runtime.acceptChannelInbound({
         connectionId: connection.id,
         channelId: channel.id,
-        adapterKey: 'web',
+        adapterKey: 'fixture-alpha',
         platformEventId: 'browser-event-1',
         kind: 'message-created',
         senderMemberId: sender.id,
@@ -2261,8 +2267,8 @@ describe('DSH Host and Web Channel vertical slice', () => {
         textModel: { mode: 'disabled' },
       },
     })
-    const connection = core.createConnection({ adapterKey: 'web', config: {} })
-    const channel = core.createChannel({ connectionId: connection.id, platformChannelId: 'images', kind: 'web' })
+    const connection = core.createConnection({ adapterKey: 'fixture-alpha', config: {} })
+    const channel = core.createChannel({ connectionId: connection.id, platformChannelId: 'images', kind: 'internal' })
     const assetService = new AssetService(repository, path.join(directory, 'assets'))
     const imageAsset = await assetService.prepare({
       bytes: new Uint8Array(
@@ -2298,7 +2304,9 @@ describe('DSH Host and Web Channel vertical slice', () => {
 
     const model = new ImageInspectionProbeModel([imageAsset.asset.id, secondImageAsset.asset.id])
     const runtimeRef: { current?: ChannelRuntime } = {}
-    const web = createWebAdapterConnection(connection.id, (event) => runtimeRef.current!.acceptInbound(event))
+    const web = createFakeLocalChannelConnection(connection.id, (event) =>
+      runtimeRef.current!.acceptChannelInbound(event),
+    )
     const host = await DshHostRuntime.create({
       sessionDatabasePath: path.join(directory, 'sessions.sqlite'),
       communication: { sendMessage: (input) => runtimeRef.current!.sendMessage(input) },
@@ -2382,8 +2390,12 @@ describe('DSH Host and Web Channel vertical slice', () => {
       persona: '',
       model: { provider: 'deepseek-official', model: 'vision-model' },
     })
-    const connection = core.createConnection({ adapterKey: 'web', config: {} })
-    const channel = core.createChannel({ connectionId: connection.id, platformChannelId: 'deepseek-wire', kind: 'web' })
+    const connection = core.createConnection({ adapterKey: 'fixture-alpha', config: {} })
+    const channel = core.createChannel({
+      connectionId: connection.id,
+      platformChannelId: 'deepseek-wire',
+      kind: 'internal',
+    })
     const assetService = new AssetService(repository, path.join(directory, 'assets'))
     const prepared: AssetRecord[] = []
     for (const index of [1, 2, 3, 4]) {
@@ -2486,7 +2498,9 @@ describe('DSH Host and Web Channel vertical slice', () => {
     if (address === null || typeof address === 'string') throw new Error('DeepSeek test upstream did not bind TCP.')
     const upstreamOrigin = `http://127.0.0.1:${address.port}`
     const runtimeRef: { current?: ChannelRuntime } = {}
-    const web = createWebAdapterConnection(connection.id, (event) => runtimeRef.current!.acceptInbound(event))
+    const web = createFakeLocalChannelConnection(connection.id, (event) =>
+      runtimeRef.current!.acceptChannelInbound(event),
+    )
     const host = await DshHostRuntime.create({
       sessionDatabasePath: path.join(directory, 'sessions.sqlite'),
       communication: { sendMessage: (input) => runtimeRef.current!.sendMessage(input) },
@@ -2598,11 +2612,11 @@ describe('DSH Host and Web Channel vertical slice', () => {
       persona: '',
       model: { provider: 'vision-provider', model: 'vision-model' },
     })
-    const connection = core.createConnection({ adapterKey: 'web', config: {} })
+    const connection = core.createConnection({ adapterKey: 'fixture-alpha', config: {} })
     const channel = core.createChannel({
       connectionId: connection.id,
       platformChannelId: 'invalid-images',
-      kind: 'web',
+      kind: 'internal',
     })
     const assetService = new AssetService(repository, path.join(directory, 'assets'))
     const validImage = await assetService.prepare({
@@ -2647,7 +2661,9 @@ describe('DSH Host and Web Channel vertical slice', () => {
     ]
     const model = new InvalidImageInspectionProbeModel(argumentSets)
     const runtimeRef: { current?: ChannelRuntime } = {}
-    const web = createWebAdapterConnection(connection.id, (event) => runtimeRef.current!.acceptInbound(event))
+    const web = createFakeLocalChannelConnection(connection.id, (event) =>
+      runtimeRef.current!.acceptChannelInbound(event),
+    )
     const host = await DshHostRuntime.create({
       sessionDatabasePath: path.join(directory, 'sessions.sqlite'),
       communication: { sendMessage: (input) => runtimeRef.current!.sendMessage(input) },
@@ -2720,8 +2736,12 @@ describe('DSH Host and Web Channel vertical slice', () => {
     let coreId = 0
     let runtimeId = 0
     const core = new CoreService(repository, { now: () => 3000, nextUlid: () => `D${++coreId}` })
-    const connection = core.createConnection({ adapterKey: 'web', config: {} })
-    const channel = core.createChannel({ connectionId: connection.id, platformChannelId: 'delegated', kind: 'web' })
+    const connection = core.createConnection({ adapterKey: 'fixture-alpha', config: {} })
+    const channel = core.createChannel({
+      connectionId: connection.id,
+      platformChannelId: 'delegated',
+      kind: 'internal',
+    })
     const assetService = new AssetService(repository, path.join(directory, 'assets'))
     const imageAsset = await assetService.prepare({
       bytes: new Uint8Array(
@@ -2759,7 +2779,9 @@ describe('DSH Host and Web Channel vertical slice', () => {
     const primary = new TextInspectionProbeModel(imageAsset.asset.id)
     const auxiliary = new AuxiliaryVisionEvidenceModel(imageAsset.asset.id)
     const runtimeRef: { current?: ChannelRuntime } = {}
-    const web = createWebAdapterConnection(connection.id, (event) => runtimeRef.current!.acceptInbound(event))
+    const web = createFakeLocalChannelConnection(connection.id, (event) =>
+      runtimeRef.current!.acceptChannelInbound(event),
+    )
     const host = await DshHostRuntime.create({
       sessionDatabasePath: path.join(directory, 'sessions.sqlite'),
       communication: { sendMessage: (input) => runtimeRef.current!.sendMessage(input) },
@@ -2859,8 +2881,8 @@ describe('DSH Host and Web Channel vertical slice', () => {
         textModel: { mode: 'disabled' },
       },
     })
-    const connection = core.createConnection({ adapterKey: 'web', config: {} })
-    const channel = core.createChannel({ connectionId: connection.id, platformChannelId: 'restore', kind: 'web' })
+    const connection = core.createConnection({ adapterKey: 'fixture-alpha', config: {} })
+    const channel = core.createChannel({ connectionId: connection.id, platformChannelId: 'restore', kind: 'internal' })
     const assetService = new AssetService(repository, path.join(directory, 'assets'))
     const imageAsset = await assetService.prepare({
       bytes: new Uint8Array(
@@ -2880,7 +2902,9 @@ describe('DSH Host and Web Channel vertical slice', () => {
     core.createBinding({ channelId: channel.id, agentId: agent.definition.id, triggerPolicy: 'always' })
     const model = new ScriptedCommunicationModel(true)
     const runtimeRef: { current?: ChannelRuntime } = {}
-    const web = createWebAdapterConnection(connection.id, (event) => runtimeRef.current!.acceptInbound(event))
+    const web = createFakeLocalChannelConnection(connection.id, (event) =>
+      runtimeRef.current!.acceptChannelInbound(event),
+    )
     const host = await DshHostRuntime.create({
       sessionDatabasePath: path.join(directory, 'sessions.sqlite'),
       communication: { sendMessage: (input) => runtimeRef.current!.sendMessage(input) },

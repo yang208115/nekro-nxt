@@ -5,7 +5,15 @@ import ts from 'typescript'
 
 const root = process.cwd()
 const productRoot = 'apps/web/src'
-const contributionCopyRoots = ['packages/adapter-web/src', 'packages/adapter-qq-openclaw/src']
+const contributionCopyRoots = (await readdir(path.join(root, 'packages'), { withFileTypes: true }))
+  .filter(
+    (entry) =>
+      entry.isDirectory() &&
+      entry.name.startsWith('adapter-') &&
+      entry.name !== 'adapter-sdk' &&
+      entry.name !== 'adapter-builtin-roster',
+  )
+  .map((entry) => `packages/${entry.name}/src`)
 const visibleSourceRoots = [productRoot, ...contributionCopyRoots]
 const copyGuide = 'docs/01-术语与文案规范.md §4.1「界面文案只说明对象、范围和结果」'
 const terminologyGuide = 'docs/01-术语与文案规范.md §3–4'

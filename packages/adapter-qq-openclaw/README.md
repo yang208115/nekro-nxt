@@ -14,6 +14,6 @@
 - `parseQQCardDump` / `parseQQChatRecordDump` / `parseQQRichPayload`：把 `[卡片消息]` 倾倒、`[群聊的聊天记录] === 消息 N ===` 拍扁转发、embed 和 ark 编成可兜底的 rich 载荷；
 - `createQQGatewayCheckpointStore`：Connection 作用域 resume 状态。
 
-产品 Host 通过 `QQCoreBridge` 接入 Core 身份、Quote 和两阶段 Asset，并通过 Host-owned Credential Resolver 提供 Secret。无密钥测试覆盖真实生产组合根但替换外部网络边界；通知高亮、平台额度和真实 CDN/上传仍必须使用专用 QQ 账号验收。
+Adapter 通过通用 `identities`、`members`、`messages`、`assets`、`credentials`、`state`、`diagnostics` 和 `transport` Host Service 接入身份、Quote、两阶段 Asset、Gateway checkpoint、网络与诊断；Server 不保留 QQ Bridge。无密钥测试覆盖真实生产贡献但替换外部网络边界；通知高亮、平台额度和真实 CDN/上传仍必须使用专用 QQ 账号验收。
 
 QQ 引用只在当前 Connection 和 Channel 内把平台引用映射为 `logicalMessageId`。`message_type` 表示回复但缺少引用字段、或平台引用无法命中已持久消息时，Adapter 发布不包含原始 payload、平台消息 ID 或成员标识的原因诊断；入站正文继续提交，但不伪造 quote。

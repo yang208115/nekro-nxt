@@ -9,6 +9,7 @@ const brandedId = <Prefix extends string, Brand extends string>(prefix: Prefix, 
 export const AgentIdSchema = brandedId('agt', 'AgentId')
 export const AgentRevisionIdSchema = brandedId('arev', 'AgentRevisionId')
 export const ConnectionIdSchema = brandedId('con', 'ConnectionId')
+export const ConnectionEventIdSchema = brandedId('cev', 'ConnectionEventId')
 export const ChannelIdSchema = brandedId('chn', 'ChannelId')
 export const ChannelEventIdSchema = brandedId('evt', 'ChannelEventId')
 export const PlatformIdentityIdSchema = brandedId('pid', 'PlatformIdentityId')
@@ -31,6 +32,7 @@ export const AuthoringAttemptIdSchema = brandedId('aua', 'AuthoringAttemptId')
 export type AgentId = z.infer<typeof AgentIdSchema>
 export type AgentRevisionId = z.infer<typeof AgentRevisionIdSchema>
 export type ConnectionId = z.infer<typeof ConnectionIdSchema>
+export type ConnectionEventId = z.infer<typeof ConnectionEventIdSchema>
 export type ChannelId = z.infer<typeof ChannelIdSchema>
 export type ChannelEventId = z.infer<typeof ChannelEventIdSchema>
 export type PlatformIdentityId = z.infer<typeof PlatformIdentityIdSchema>
@@ -50,33 +52,14 @@ export type HostUiPageInstanceId = z.infer<typeof HostUiPageInstanceIdSchema>
 export type AuthoringTaskId = z.infer<typeof AuthoringTaskIdSchema>
 export type AuthoringAttemptId = z.infer<typeof AuthoringAttemptIdSchema>
 
-export const ChannelActivityTypeSchema = z.enum([
-  'member-poked',
-  'profile-liked',
-  'member-joined',
-  'member-left',
-  'member-muted',
-  'member-unmuted',
-  'member-admin-set',
-  'member-admin-unset',
-  'member-card-changed',
-  'member-title-changed',
-  'channel-name-changed',
-  'message-recalled',
-  'message-reaction-added',
-  'message-reaction-removed',
-  'file-uploaded',
-  'essence-added',
-  'essence-removed',
-  'friend-added',
-  'conversation-entered',
-  'card-action-invoked',
-  'message-feedback-positive',
-  'message-feedback-negative',
-  'message-feedback-withdrawn',
-])
+export const AdapterActivityKeySchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(128)
+  .regex(/^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)*$/u, 'Adapter activity key has an invalid format.')
 
-export type ChannelActivityType = z.infer<typeof ChannelActivityTypeSchema>
+export type AdapterActivityKey = z.infer<typeof AdapterActivityKeySchema>
 
 const PromptTextSegmentSchema = z.object({ type: z.literal('text'), text: z.string() }).strict()
 

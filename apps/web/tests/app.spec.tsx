@@ -36,9 +36,9 @@ const browserAgentId = AgentIdSchema.parse('agt_verylongtechnicalid')
 const browserRevisionId = AgentRevisionIdSchema.parse('arev_technicalid')
 const browserChannelId = ChannelIdSchema.parse('chn_webmain')
 const emptyChannelId = ChannelIdSchema.parse('chn_empty')
-const qqChannelId = ChannelIdSchema.parse('chn_qqinternal')
+const externalChannelId = ChannelIdSchema.parse('chn_external')
 const browserConnectionId = ConnectionIdSchema.parse('con_webinternal')
-const qqConnectionId = ConnectionIdSchema.parse('con_qqinternal')
+const externalConnectionId = ConnectionIdSchema.parse('con_external')
 const browserExtensionId = ExtensionIdSchema.parse('ext_internal')
 const browserExtensionRevisionId = ExtensionRevisionIdSchema.parse('xrv_internal')
 const browserExtensionPreviousRevisionId = ExtensionRevisionIdSchema.parse('xrv_previous')
@@ -76,20 +76,26 @@ const browserSnapshot = HostApiContracts.snapshot.response.parse({
   },
   connectionAdapters: [
     {
-      key: 'web',
+      key: 'fixture-alpha',
       displayName: '内置频道',
       description: '内置频道',
-      userCreatable: false,
+      provisioning: 'system-singleton',
+      channelKinds: ['internal'],
+      activities: [],
+      features: {},
       aliasEditable: false,
       channelDiscovery: 'host-created',
       diagnostics: { receive: false, send: false },
       configSchema: { schemaVersion: 1, type: 'object', required: [], properties: {} },
     },
     {
-      key: 'qq-openclaw',
-      displayName: 'QQ 开放平台',
-      description: '连接 QQ 机器人账号',
-      userCreatable: true,
+      key: 'fixture-beta',
+      displayName: '示例群聊平台',
+      description: '连接示例群聊平台账号',
+      provisioning: 'user-created',
+      channelKinds: ['direct', 'group'],
+      activities: [],
+      features: {},
       aliasEditable: true,
       channelDiscovery: 'adapter-observed',
       diagnostics: { receive: true, send: true },
@@ -143,8 +149,8 @@ const browserSnapshot = HostApiContracts.snapshot.response.parse({
     {
       id: browserChannelId,
       connectionId: browserConnectionId,
-      platformChannelId: 'web-main-platform-id',
-      kind: 'web',
+      platformChannelId: 'internal-main-platform-id',
+      kind: 'internal',
       displayName: '资料员对话',
       boundAgentId: browserAgentId,
       bindings: [
@@ -160,7 +166,7 @@ const browserSnapshot = HostApiContracts.snapshot.response.parse({
       id: emptyChannelId,
       connectionId: browserConnectionId,
       platformChannelId: 'empty-platform-id',
-      kind: 'web',
+      kind: 'internal',
       displayName: '空频道',
       boundAgentId: browserAgentId,
       bindings: [
@@ -173,15 +179,15 @@ const browserSnapshot = HostApiContracts.snapshot.response.parse({
       ],
     },
     {
-      id: qqChannelId,
-      connectionId: qqConnectionId,
-      platformChannelId: 'qq-platform-channel-1234',
+      id: externalChannelId,
+      connectionId: externalConnectionId,
+      platformChannelId: 'opaque-group-alpha',
       kind: 'group',
       displayName: '产品讨论群',
       boundAgentId: browserAgentId,
       bindings: [
         {
-          channelId: qqChannelId,
+          channelId: externalChannelId,
           agentId: browserAgentId,
           triggerPolicy: 'mentioned-or-replied',
           boundAt: 1_725_000_000_200,
@@ -199,7 +205,7 @@ const browserSnapshot = HostApiContracts.snapshot.response.parse({
     },
     {
       id: otherEventId,
-      channelId: qqChannelId,
+      channelId: externalChannelId,
       role: 'member',
       parts: [{ type: 'text', text: '不能混入当前频道' }],
       occurredAt: 1_725_000_001_000,
@@ -208,23 +214,24 @@ const browserSnapshot = HostApiContracts.snapshot.response.parse({
   connections: [
     {
       id: browserConnectionId,
-      adapterKey: 'web',
-      appId: '',
-      proactiveSend: false,
-      credentialConfigured: true,
+      adapterKey: 'fixture-alpha',
+      status: { state: 'connected', proactiveSend: false, credentialConfigured: true, activities: {} },
       channelCount: 2,
       knownChannels: [],
     },
     {
-      id: qqConnectionId,
-      adapterKey: 'qq-openclaw',
-      appId: '1234567890',
-      credentialConfigured: true,
-      proactiveSend: true,
+      id: externalConnectionId,
+      adapterKey: 'fixture-beta',
+      status: {
+        state: 'connected',
+        proactiveSend: true,
+        credentialConfigured: true,
+        accountReference: '1234567890',
+        activities: {},
+      },
       channelCount: 1,
-      knownChannels: [{ id: qqChannelId, name: '产品讨论群', kind: 'group' }],
-      gateway: { state: 'connected', resumed: true },
-      receiveTest: { status: 'received', channelId: qqChannelId, platformMessageId: 'qq-received' },
+      knownChannels: [{ id: externalChannelId, name: '产品讨论群', kind: 'group' }],
+      receiveTest: { status: 'received', channelId: externalChannelId, platformMessageId: 'fixture-received' },
     },
   ],
   extensions: [
@@ -520,6 +527,7 @@ describe('NekroNxt product shell', () => {
       messages: state.messages,
       channelRuntimes: state.channelRuntimes,
       connections: state.connections,
+      archivedConnections: state.archivedConnections,
       extensions: state.extensions,
       platformUsersRevision: state.platformUsersRevision,
       approvals: state.approvals,
@@ -563,6 +571,7 @@ describe('NekroNxt product shell', () => {
           messages: state.messages,
           channelRuntimes: state.channelRuntimes,
           connections: state.connections,
+          archivedConnections: state.archivedConnections,
           extensions: state.extensions,
           platformUsersRevision: state.platformUsersRevision,
           approvals: state.approvals,
@@ -1056,7 +1065,7 @@ describe.sequential('NekroNxt browser projections', { timeout: 30_000 }, () => {
                 {
                   identityId: 'pid_membera',
                   displayName: '成员甲',
-                  adapter: { key: 'qq-openclaw', displayName: 'QQ 开放平台' },
+                  adapter: { key: 'fixture-beta', displayName: '示例群聊平台' },
                   connection: { id: browserConnectionId, displayName: '测试账号' },
                   activeChannelCount: 1,
                   channelPreview: [{ id: browserChannelId, displayName: '资料讨论组', kind: 'group' }],
@@ -1064,9 +1073,9 @@ describe.sequential('NekroNxt browser projections', { timeout: 30_000 }, () => {
                 },
               ],
               facets: {
-                adapters: [{ key: 'qq-openclaw', displayName: 'QQ 开放平台', userCount: 1 }],
+                adapters: [{ key: 'fixture-beta', displayName: '示例群聊平台', userCount: 1 }],
                 connections: [
-                  { id: browserConnectionId, adapterKey: 'qq-openclaw', displayName: '测试账号', userCount: 1 },
+                  { id: browserConnectionId, adapterKey: 'fixture-beta', displayName: '测试账号', userCount: 1 },
                 ],
               },
             }),
@@ -1342,7 +1351,7 @@ describe.sequential('NekroNxt browser projections', { timeout: 30_000 }, () => {
                 {
                   identityId: 'pid_membera',
                   displayName: '成员甲',
-                  adapter: { key: 'qq-openclaw', displayName: 'QQ 开放平台' },
+                  adapter: { key: 'fixture-beta', displayName: '示例群聊平台' },
                   connection: { id: browserConnectionId, displayName: '测试账号' },
                   activeChannelCount: 1,
                   channelPreview: [{ id: browserChannelId, displayName: '资料讨论组', kind: 'group' }],
@@ -1350,9 +1359,9 @@ describe.sequential('NekroNxt browser projections', { timeout: 30_000 }, () => {
                 },
               ],
               facets: {
-                adapters: [{ key: 'qq-openclaw', displayName: 'QQ 开放平台', userCount: 1 }],
+                adapters: [{ key: 'fixture-beta', displayName: '示例群聊平台', userCount: 1 }],
                 connections: [
-                  { id: browserConnectionId, adapterKey: 'qq-openclaw', displayName: '测试账号', userCount: 1 },
+                  { id: browserConnectionId, adapterKey: 'fixture-beta', displayName: '测试账号', userCount: 1 },
                 ],
               },
             }),
@@ -1484,7 +1493,7 @@ describe.sequential('NekroNxt browser projections', { timeout: 30_000 }, () => {
 
   it('renders platform accounts with product labels and binds without leaving the connection page', async () => {
     await withProductPage('/connections', async (page) => {
-      await page.getByRole('link', { name: /QQ 开放平台/u }).click()
+      await page.getByRole('link', { name: /示例群聊平台/u }).click()
       await playwrightExpect(page.getByText('尾号 7890', { exact: true })).toBeVisible()
       await playwrightExpect(page.locator('body')).toContainText('内置频道')
       await playwrightExpect(page.getByRole('button', { name: '绑定智能体' })).toBeVisible()
@@ -1503,28 +1512,28 @@ describe.sequential('NekroNxt browser projections', { timeout: 30_000 }, () => {
         await request.fulfill({
           status: 201,
           contentType: 'application/json',
-          body: JSON.stringify({ connectionId: qqConnectionId, adapterKey: 'qq-openclaw' }),
+          body: JSON.stringify({ connectionId: externalConnectionId, adapterKey: 'fixture-beta' }),
         })
       })
       const dialog = page.getByRole('dialog')
       await dialog.getByLabel('平台').click()
-      await page.getByRole('option', { name: 'QQ 开放平台' }).click()
+      await page.getByRole('option', { name: '示例群聊平台' }).click()
       await page.getByRole('button', { name: '填写连接信息' }).click()
       await page.getByLabel('连接别名').fill('项目机器人')
       await page.getByRole('button', { name: '创建连接' }).click()
       await playwrightExpect(page.getByRole('dialog')).toBeHidden()
     })
-    expect(createRequestBody).toMatchObject({ alias: '项目机器人', adapterKey: 'qq-openclaw' })
+    expect(createRequestBody).toMatchObject({ alias: '项目机器人', adapterKey: 'fixture-beta' })
 
     const aliasedSnapshot = {
       ...browserSnapshot,
       connections: browserSnapshot.connections.map((connection) =>
-        connection.id === qqConnectionId ? { ...connection, alias: '项目机器人' } : connection,
+        connection.id === externalConnectionId ? { ...connection, alias: '项目机器人' } : connection,
       ),
     }
     let currentAlias = '项目机器人'
     await withProductPage(
-      `/connections/${qqConnectionId}`,
+      `/connections/${externalConnectionId}`,
       async (page) => {
         await page.route('**/api/snapshot', async (request) => {
           await request.fulfill({
@@ -1533,17 +1542,20 @@ describe.sequential('NekroNxt browser projections', { timeout: 30_000 }, () => {
             body: JSON.stringify({
               ...aliasedSnapshot,
               connections: aliasedSnapshot.connections.map((connection) =>
-                connection.id === qqConnectionId ? { ...connection, alias: currentAlias } : connection,
+                connection.id === externalConnectionId ? { ...connection, alias: currentAlias } : connection,
               ),
             }),
           })
         })
-        await page.route(`**/api/connections/${qqConnectionId}/alias`, async (request) => {
+        await page.route(`**/api/connections/${externalConnectionId}/alias`, async (request) => {
           currentAlias = HostApiContracts.updateConnectionAlias.parseRequest(request.request().postDataJSON()).alias
           await request.fulfill({
             status: 200,
             contentType: 'application/json',
-            body: JSON.stringify({ connectionId: qqConnectionId, ...(currentAlias ? { alias: currentAlias } : {}) }),
+            body: JSON.stringify({
+              connectionId: externalConnectionId,
+              ...(currentAlias ? { alias: currentAlias } : {}),
+            }),
           })
         })
         await playwrightExpect(page.getByText('项目机器人', { exact: true }).first()).toBeVisible()
@@ -1551,7 +1563,7 @@ describe.sequential('NekroNxt browser projections', { timeout: 30_000 }, () => {
         await page.getByRole('button', { name: '保存别名' }).click()
         await playwrightExpect(page.getByText('研发机器人', { exact: true }).first()).toBeVisible()
         await page.getByRole('button', { name: '清除' }).click()
-        await playwrightExpect(page.getByText('QQ 开放平台', { exact: true }).first()).toBeVisible()
+        await playwrightExpect(page.getByText('示例群聊平台', { exact: true }).first()).toBeVisible()
         await playwrightExpect(page.getByLabel('辨识名')).toHaveValue('')
       },
       aliasedSnapshot,
@@ -2041,7 +2053,7 @@ describe.sequential('NekroNxt browser projections', { timeout: 30_000 }, () => {
 
   it('keeps priority layouts within the desktop viewport at 1100, 1440, and 1920 pixels', async () => {
     const cases = [
-      { width: 1100, height: 720, route: '/connections', name: 'connections-1100', marker: 'QQ 开放平台' },
+      { width: 1100, height: 720, route: '/connections', name: 'connections-1100', marker: '示例群聊平台' },
       {
         width: 1440,
         height: 900,

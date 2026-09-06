@@ -1,7 +1,7 @@
 import type {
   AdapterConnectionRuntime,
   AdapterDeliveryReceipt,
-  AdapterInboundEvent,
+  AdapterChannelInboundEvent,
   AdapterRuntimeStateStore,
   InboundCommitResult,
   PhysicalDeliveryRequest,
@@ -164,7 +164,7 @@ export type ChannelHistoryEntry =
       readonly channelId: ChannelId
       readonly occurredAt: number
       readonly senderMemberId?: ChannelEventRecord['senderMemberId']
-      readonly activityType?: ChannelEventRecord['activityType']
+      readonly activityKey?: ChannelEventRecord['activityKey']
       readonly targetLogicalMessageId?: ChannelEventRecord['targetLogicalMessageId']
       readonly parts: readonly MessagePart[]
       readonly facts?: ChannelEventRecord['facts']
@@ -313,6 +313,12 @@ export interface ChannelRuntimeOptions {
   readonly now?: () => number
   readonly nextUlid?: () => string
   readonly resolveAdapter: (connectionId: ConnectionId) => AdapterConnectionRuntime | undefined
+  readonly isActivityTriggerAllowed?: (channelId: ChannelId, activityKey: string) => boolean
+  readonly isActivityTriggerEnabledByDefault?: (channelId: ChannelId, activityKey: string) => boolean
+  readonly validateActivityTriggerOverrides?: (
+    channelId: ChannelId,
+    overrides: Readonly<Record<string, boolean>>,
+  ) => void
   readonly idleRolloverMs?: number | false
   readonly adapterState?: AdapterRuntimeStateStore
 }
@@ -526,10 +532,20 @@ export interface RuntimeRecoveryReport {
   readonly unknownDeliveries: number
 }
 
-const isTriggered = (binding: BindingRecord, event: ChannelEventRecord): boolean => {
+const isTriggered = (
+  binding: BindingRecord,
+  event: ChannelEventRecord,
+  isActivityTriggerAllowed: (channelId: ChannelId, activityKey: string) => boolean = () => true,
+  isActivityTriggerEnabledByDefault: (channelId: ChannelId, activityKey: string) => boolean = () => false,
+): boolean => {
   if (event.facts?.['consoleAnchor'] === true || event.facts?.['selfInteraction'] === true) return false
-  if (event.activityType !== undefined) {
-    return binding.triggerPolicy !== 'observe-only' && binding.eventTriggers.includes(event.activityType)
+  if (event.activityKey !== undefined) {
+    return (
+      binding.triggerPolicy !== 'observe-only' &&
+      isActivityTriggerAllowed(event.channelId, event.activityKey) &&
+      (binding.activityTriggerOverrides[event.activityKey] ??
+        isActivityTriggerEnabledByDefault(event.channelId, event.activityKey))
+    )
   }
   switch (binding.triggerPolicy) {
     case 'always':
@@ -546,17 +562,17 @@ const isTriggered = (binding: BindingRecord, event: ChannelEventRecord): boolean
 const supportsPart = (adapter: AdapterConnectionRuntime, part: MessagePart): boolean => {
   switch (part.type) {
     case 'text':
-      return adapter.capabilities.text
+      return adapter.capabilities.outbound.text
     case 'mention':
-      return adapter.capabilities.mentions
+      return adapter.capabilities.outbound.mentions
     case 'image':
-      return adapter.capabilities.images
+      return adapter.capabilities.outbound.images
     case 'file':
-      return adapter.capabilities.files
+      return adapter.capabilities.outbound.files
     case 'audio':
-      return adapter.capabilities.audio
+      return adapter.capabilities.outbound.audio
     case 'quote':
-      return adapter.capabilities.replies
+      return adapter.capabilities.outbound.replies
     case 'rich':
       return false
   }
@@ -578,6 +594,9 @@ export class ChannelRuntime {
   readonly #runtimeRepository: RuntimeRepository
   readonly #sessionDriver: AgentSessionDriver
   readonly #resolveAdapter: ChannelRuntimeOptions['resolveAdapter']
+  readonly #isActivityTriggerAllowed: NonNullable<ChannelRuntimeOptions['isActivityTriggerAllowed']>
+  readonly #isActivityTriggerEnabledByDefault: NonNullable<ChannelRuntimeOptions['isActivityTriggerEnabledByDefault']>
+  readonly #validateActivityTriggerOverrides: NonNullable<ChannelRuntimeOptions['validateActivityTriggerOverrides']>
   readonly #now: () => number
   readonly #nextUlid: () => string
   readonly #idleRolloverMs: number | false
@@ -610,6 +629,9 @@ export class ChannelRuntime {
     this.#runtimeRepository = runtimeRepository
     this.#sessionDriver = sessionDriver
     this.#resolveAdapter = options.resolveAdapter
+    this.#isActivityTriggerAllowed = options.isActivityTriggerAllowed ?? (() => true)
+    this.#isActivityTriggerEnabledByDefault = options.isActivityTriggerEnabledByDefault ?? (() => false)
+    this.#validateActivityTriggerOverrides = options.validateActivityTriggerOverrides ?? (() => undefined)
     this.#now = options.now ?? Date.now
     this.#nextUlid = options.nextUlid ?? monotonicFactory()
     this.#idleRolloverMs = options.idleRolloverMs ?? 6 * 60 * 60 * 1000
@@ -619,7 +641,7 @@ export class ChannelRuntime {
     }
   }
 
-  async acceptInbound(event: AdapterInboundEvent): Promise<InboundCommitResult> {
+  async acceptChannelInbound(event: AdapterChannelInboundEvent): Promise<InboundCommitResult> {
     const commit = this.#core.appendInbound(event)
     if (commit.inserted) {
       this.#publishFact({ channelId: event.channelId, kind: 'inbound', sourceId: commit.event.id })
@@ -627,7 +649,15 @@ export class ChannelRuntime {
         this.#coreRepository
           .listBindings(event.channelId)
           .filter((binding) => {
-            if (isTriggered(binding, commit.event)) return true
+            if (
+              isTriggered(
+                binding,
+                commit.event,
+                this.#isActivityTriggerAllowed,
+                this.#isActivityTriggerEnabledByDefault,
+              )
+            )
+              return true
             const episode = this.#runtimeRepository.getActiveEpisode(binding.channelId, binding.agentId)
             return (
               episode?.dshSessionId !== undefined &&
@@ -752,7 +782,7 @@ export class ChannelRuntime {
           channelId: channel.id,
           adapterKey: this.#coreRepository.getConnection(channel.connectionId)!.adapterKey,
           kind: 'message-deleted',
-          activityType: 'message-recalled',
+          activityKey: 'message-recalled',
           targetPlatformMessageId: delivery.platformMessageId,
           parts: [
             {
@@ -850,8 +880,10 @@ export class ChannelRuntime {
     readonly agentId: AgentId
     readonly triggerPolicy: BindingRecord['triggerPolicy']
     readonly processingFeedback?: BindingRecord['processingFeedback']
-    readonly eventTriggers?: BindingRecord['eventTriggers']
+    readonly activityTriggerOverrides?: BindingRecord['activityTriggerOverrides']
   }): Promise<BindingRecord> {
+    if (input.activityTriggerOverrides !== undefined)
+      this.#validateActivityTriggerOverrides(input.channelId, input.activityTriggerOverrides)
     return this.#withBindingTransition(input.channelId, async () => {
       const current = this.#coreRepository.getBinding(input.channelId)
       const laneAgentId = current?.agentId ?? input.agentId
@@ -873,7 +905,7 @@ export class ChannelRuntime {
         return this.#core.replaceBinding({
           ...input,
           processingFeedback: input.processingFeedback ?? current?.processingFeedback ?? 'auto',
-          eventTriggers: input.eventTriggers ?? current?.eventTriggers ?? [],
+          activityTriggerOverrides: input.activityTriggerOverrides ?? current?.activityTriggerOverrides ?? {},
         })
       })
     })
@@ -897,6 +929,30 @@ export class ChannelRuntime {
           )
         }
         this.#core.clearBinding(channelId)
+      })
+    })
+  }
+
+  /** Stops the live lane while preserving the Channel and its Binding for a later Connection restore. */
+  async suspendChannel(channelId: ChannelId): Promise<void> {
+    await this.#withBindingTransition(channelId, async () => {
+      const current = this.#coreRepository.getBinding(channelId)
+      if (!current) return
+      await this.#withLane(channelId, current.agentId, async () => {
+        const episode = this.#runtimeRepository.getActiveEpisode(channelId, current.agentId)
+        if (episode?.dshSessionId !== undefined) {
+          this.#feedbackEndReasons.set(episode.id, 'cancelled')
+          await this.#sessionDriver.cancelSession(episode.dshSessionId, 'stopped')
+          await this.#cleanupEpisodeFeedback(episode.id)
+        }
+        if (episode !== undefined) {
+          this.#runtimeRepository.closeEpisode(
+            episode.id,
+            'stopped',
+            episode.lastAdmittedEventId ?? episode.openedAtEventId,
+            this.#timestamp(),
+          )
+        }
       })
     })
   }
@@ -973,7 +1029,7 @@ export class ChannelRuntime {
                   ...(originEvent.platformMessageId === undefined
                     ? {}
                     : { platformMessageId: originEvent.platformMessageId }),
-                  ...(originEvent.activityType === undefined ? {} : { activityType: originEvent.activityType }),
+                  ...(originEvent.activityKey === undefined ? {} : { activityKey: originEvent.activityKey }),
                   receivedAt: originEvent.receivedAt,
                 },
               }),
@@ -986,7 +1042,7 @@ export class ChannelRuntime {
                 },
               }),
         })
-      : adapter.capabilities.mixedContent
+      : adapter.capabilities.outbound.mixedContent
         ? [{ parts: input.parts }]
         : input.parts.map((part) => ({ parts: [part] }))
     if (plans.length === 0 || plans.some(({ parts }) => parts.length === 0)) {
@@ -1001,8 +1057,8 @@ export class ChannelRuntime {
         if (!supportsPart(adapter, part)) throw new Error(`Adapter planner produced an unsupported part: ${part.type}`)
         if (
           part.type === 'text' &&
-          adapter.capabilities.maxTextLength !== undefined &&
-          [...part.text].length > adapter.capabilities.maxTextLength
+          adapter.capabilities.outbound.maxTextLength !== undefined &&
+          [...part.text].length > adapter.capabilities.outbound.maxTextLength
         ) {
           throw new Error('Adapter outbound planner produced over-limit text.')
         }
@@ -1047,14 +1103,14 @@ export class ChannelRuntime {
   }): Promise<SendMessageResult> {
     const channel = this.#coreRepository.getChannel(input.channelId)
     if (!channel) throw new Error(`Unknown channel: ${input.channelId}`)
-    if (channel.kind === 'web') {
+    if (channel.kind === 'internal') {
       throw new Error('Web channels accept inbound conversation, not robot-account delivery.')
     }
     const binding = this.#coreRepository.getBinding(channel.id)
     if (!binding) throw new Error('Channel has no Binding.')
     const adapter = this.#resolveAdapter(channel.connectionId)
     if (!adapter) throw new Error(`Connection adapter is not running: ${channel.connectionId}`)
-    if (!adapter.capabilities.proactiveSend) {
+    if (!adapter.capabilities.outbound.proactiveSend) {
       throw new Error('Adapter does not allow proactive send.')
     }
     return this.#withLane(channel.id, binding.agentId, async () => {
@@ -1154,7 +1210,15 @@ export class ChannelRuntime {
             events,
             mode: admission.mode,
             replyRequired:
-              binding?.agentId === episode.agentId && events.some((candidate) => isTriggered(binding, candidate)),
+              binding?.agentId === episode.agentId &&
+              events.some((candidate) =>
+                isTriggered(
+                  binding,
+                  candidate,
+                  this.#isActivityTriggerAllowed,
+                  this.#isActivityTriggerEnabledByDefault,
+                ),
+              ),
           })
           this.#runtimeRepository.completeAdmission(admission.id, result.dshMessageId, lastEventId)
           report.recoveredAdmissions += 1
@@ -1434,7 +1498,10 @@ export class ChannelRuntime {
         mode: admission.mode,
         replyRequired: admission.eventIds.some((eventId) => {
           const candidate = this.#coreRepository.getChannelEvent(eventId)
-          return candidate !== undefined && isTriggered(binding, candidate)
+          return (
+            candidate !== undefined &&
+            isTriggered(binding, candidate, this.#isActivityTriggerAllowed, this.#isActivityTriggerEnabledByDefault)
+          )
         }),
       })
       const lastEventId = admission.eventIds.at(-1)
@@ -1461,7 +1528,7 @@ export class ChannelRuntime {
     if (
       binding.processingFeedback !== 'auto' ||
       event.kind !== 'message-created' ||
-      event.activityType !== undefined ||
+      event.activityKey !== undefined ||
       event.platformMessageId === undefined
     )
       return undefined
@@ -1744,7 +1811,7 @@ export class ChannelRuntime {
     if (!binding || !episode) return
     const events = this.#runtimeRepository.listUnadmittedEvents(channelId, agentId, binding.boundAt)
     for (const event of events) {
-      if (isTriggered(binding, event)) {
+      if (isTriggered(binding, event, this.#isActivityTriggerAllowed, this.#isActivityTriggerEnabledByDefault)) {
         await this.#admit(binding, event)
       }
     }

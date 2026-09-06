@@ -134,6 +134,34 @@
       "when": 1788074961781,
       "tag": "0018_productive_starfox",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "6",
+      "when": 1788454230933,
+      "tag": "0019_adapter_activity_v2",
+      "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "6",
+      "when": 1788456709771,
+      "tag": "0020_platform_identity_connection_owner_index",
+      "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "6",
+      "when": 1788457886195,
+      "tag": "0021_connection_event_identity_ownership",
+      "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "6",
+      "when": 1788482128857,
+      "tag": "0022_connection_activity_defaults_and_archive",
+      "breakpoints": true
     }
   ]
 }

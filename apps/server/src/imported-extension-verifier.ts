@@ -1,4 +1,4 @@
-import { AdapterRegistry, type AdapterHostContributionV1 } from '@nekro-nxt/adapter-sdk'
+import { AdapterRegistry, type AdapterHostContributionV2 } from '@nekro-nxt/adapter-sdk'
 import {
   AdapterClientSlotNameSchema,
   AgentClientSlotNameSchema,
@@ -51,7 +51,7 @@ const importFactory = async (entry: string, buildKey: string, label: string) => 
   return callableOf(recordOf(loaded, `${label}模块`)['default'], `${label}默认导出`)
 }
 
-const descriptorDigest = (contribution: AdapterHostContributionV1): string =>
+const descriptorDigest = (contribution: AdapterHostContributionV2): string =>
   createHash('sha256')
     .update(canonicalJson(JsonValueSchema.parse(JSON.parse(JSON.stringify(contribution.descriptor)))))
     .digest('hex')
@@ -225,7 +225,7 @@ const verifyAdapter = async (input: ImportedRevisionVerificationInput): ReturnTy
         defineTool: () => forbidden('智能体工具'),
         registerTool: () => forbidden('智能体工具'),
         handle: () => forbidden('智能体 RPC'),
-        registerAdapter: (contribution: AdapterHostContributionV1) => {
+        registerAdapter: (contribution: AdapterHostContributionV2) => {
           if (registered) throw new Error('Adapter Host 只能注册一个适配器贡献。')
           registered = registry.register(`import:${input.revision.id}`, contribution)
           return () => void registered?.dispose()
@@ -310,7 +310,7 @@ const verifyAdapter = async (input: ImportedRevisionVerificationInput): ReturnTy
     ...(clientEvidence.renderedPages.length === 0 ? {} : { renderedPages: clientEvidence.renderedPages }),
     ...(clientEvidence.renderedPages.length === 0 ? {} : { permissions: clientEvidence.permissions }),
     adapter: {
-      apiVersion: 1,
+      apiVersion: 2,
       key: contribution.descriptor.key,
       descriptorDigest: digest,
       registered: true,

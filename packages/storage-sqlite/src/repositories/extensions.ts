@@ -171,7 +171,7 @@ const ExtensionRevisionVerificationSchema = z.object({
   permissions: HostUiPermissionDeclarationSchema.optional(),
   adapter: z
     .object({
-      apiVersion: z.literal(1),
+      apiVersion: z.literal(2),
       key: z.string().trim().min(1),
       descriptorDigest: z.string().regex(/^[a-f0-9]{64}$/u),
       registered: z.boolean(),

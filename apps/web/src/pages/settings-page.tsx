@@ -38,7 +38,7 @@ function SystemExtensionsPanel() {
               <StatusBadge tone="success">已安装</StatusBadge>
             </header>
             <p className={styles.secondaryText}>{adapter.description}</p>
-            {adapter.userCreatable ? (
+            {adapter.provisioning === 'user-created' ? (
               <Button onClick={() => void navigate(`/connections?create=1&adapter=${encodeURIComponent(adapter.key)}`)}>
                 添加账号
               </Button>

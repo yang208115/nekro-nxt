@@ -77,7 +77,7 @@ describe('channel message memoization boundary', () => {
           id: 'msg_joined',
           role: 'system',
           author: '频道事件',
-          activityType: 'member-joined',
+          activityKey: 'member-joined',
           parts: [
             { type: 'mention', memberId: 'member_a', displayName: '新成员' },
             { type: 'text', text: ' 受 ' },
@@ -130,7 +130,7 @@ describe('channel message memoization boundary', () => {
     const markup = renderToStaticMarkup(
       <ChannelMessageList
         channelId="chn_web"
-        channelKind="web"
+        channelKind="internal"
         history={loadedHistory}
         messages={[
           message({ id: 'msg_1', role: 'member', author: '成员甲', body: '你好' }),
@@ -146,7 +146,7 @@ describe('channel message memoization boundary', () => {
 
   it('shows the empty state before any message exists', () => {
     const markup = renderToStaticMarkup(
-      <ChannelMessageList channelId="chn_web" channelKind="web" history={loadedHistory} messages={[]} />,
+      <ChannelMessageList channelId="chn_web" channelKind="internal" history={loadedHistory} messages={[]} />,
     )
     expect(markup).toContain('还没有消息')
   })

@@ -1,38 +1,26 @@
 import type { Context } from '@deepseek-ai/cordis'
-import { createWebAdapterConnection, WEB_HOST_CONTRIBUTION } from '@nekro-nxt/adapter-web'
-import type { WebAdapterConnection } from '@nekro-nxt/adapter-web'
-import { createOneBot11HostContribution } from '@nekro-nxt/adapter-onebot-11'
-import { createWeComAiBotHostContribution } from '@nekro-nxt/adapter-wecom-ai-bot'
+import { BUILTIN_ADAPTER_CONTRIBUTIONS } from '@nekro-nxt/adapter-builtin-roster'
 import {
   AdapterRegistry,
+  parseAdapterCapabilities,
   type AdapterConnectionHostContext,
   type AdapterConnectionDiagnostic,
   type AdapterConnectionRuntime,
-  type AdapterHostContributionV1,
+  type AdapterHostContributionV2,
+  type AdapterLocalChannelPort,
   type AdapterTransportService,
   type RegisteredAdapterHandle,
 } from '@nekro-nxt/adapter-sdk'
-import {
-  createQQGatewayCheckpointStore,
-  QQNodeWebSocketFactory,
-  QQOpenClawConfigSchema,
-  QQOpenClawHttpTransport,
-  QQOpenClawRuntime,
-  QQ_OPENCLAW_CONNECTION_DEFINITION,
-  type QQGatewayClock,
-  type QQGatewaySocketFactory,
-  type QQGatewayStatus,
-  type QQOpenClawConnectionInput,
-} from '@nekro-nxt/adapter-qq-openclaw'
 import { ChannelRuntime } from '@nekro-nxt/channel-runtime'
 import { AssetService, CoreService } from '@nekro-nxt/core'
-import type { AgentRevisionContent, ConnectionRecord } from '@nekro-nxt/core'
+import type { AgentRevisionContent, ConnectionEventRecord, ConnectionRecord } from '@nekro-nxt/core'
 import {
   LogicalMessageIdSchema,
   DshNxtHostUiSchema,
   HostUiPageInstanceIdSchema,
   PhysicalDeliveryIdSchema,
   type AgentId,
+  type AdapterActivityKey,
   type ChannelId,
   type ConnectionId,
   type ExtensionId,
@@ -67,13 +55,10 @@ import { ChannelExtensionActivationHost, DshHostRuntime } from './index.js'
 import { fetchAdapterRemoteBytes } from './adapter-remote-assets.js'
 import { LocalCredentialStore } from './credentials.js'
 import { NotificationService } from './notifications.js'
-import { QQCoreBridge, QQRemoteAssetImporter } from './qq-openclaw.js'
 import { ServerAdapterHostInstallationHost } from './host-extension-installation.js'
 import { createProductionAdapterTransport } from './adapter-transport.js'
 import { verifyImportedExtensionRevision } from './imported-extension-verifier.js'
 import { DshPluginPackageInstaller } from './dsh-plugin-installer.js'
-
-const StoredQQConnectionConfigSchema = QQOpenClawConfigSchema.omit({ clientSecretCredentialRef: true })
 
 const parseStoredAdapterConfiguration = (value: JsonValue): Readonly<Record<string, string | number | boolean>> => {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
@@ -121,27 +106,9 @@ export interface NekroRuntimeOptions {
   readonly idleRolloverMs?: number | false
   readonly now?: () => number
   readonly nextUlid?: () => string
-  readonly qq?: {
-    readonly fetch?: typeof fetch
-    readonly sockets?: QQGatewaySocketFactory
-    readonly clock?: QQGatewayClock
-  }
   readonly notifications?: { readonly fetch?: typeof fetch }
   /** Replaced by an offline Fake for tests and AI validation; production uses fetch/ws. */
   readonly adapterTransport?: AdapterTransportService
-}
-
-export interface QQConnectionDiagnostic {
-  readonly gateway: QQGatewayStatus
-  readonly credentialConfigured: boolean
-  readonly knownChannelIds: readonly ChannelId[]
-  readonly lastInbound?: {
-    readonly channelId: ChannelId
-    readonly platformMessageId: string
-    readonly receivedAt: number
-  }
-  readonly receiveTest?: ConnectionTestResult
-  readonly sendTest?: ConnectionTestResult
 }
 
 export type ConnectionTestResult =
@@ -152,29 +119,6 @@ export type ConnectionTestResult =
       readonly message: string
     }
   | { readonly status: 'failed'; readonly kind: string; readonly message: string; readonly retryAfterMs?: number }
-
-const systemGatewayClock = (): QQGatewayClock => ({
-  now: Date.now,
-  sleep: (delayMs, signal) =>
-    new Promise<void>((resolve, reject) => {
-      const finish = (): void => {
-        signal.removeEventListener('abort', abort)
-        resolve()
-      }
-      const timer = setTimeout(finish, delayMs)
-      const abort = (): void => {
-        clearTimeout(timer)
-        signal.removeEventListener('abort', abort)
-        reject(signal.reason instanceof Error ? signal.reason : new Error('QQ Gateway sleep aborted.'))
-      }
-      if (signal.aborted) abort()
-      else signal.addEventListener('abort', abort, { once: true })
-    }),
-  setInterval: (callback, intervalMs) => {
-    const timer = setInterval(callback, intervalMs)
-    return () => clearInterval(timer)
-  },
-})
 
 /** One deliberate entity registry the domain API reads for its authoritative projection. */
 export interface AgentEntity {
@@ -192,8 +136,7 @@ export class NekroRuntime {
   readonly core: CoreService
   readonly host: DshHostRuntime
   readonly channels: ChannelRuntime
-  readonly web: WebAdapterConnection
-  readonly webConnectionId: ConnectionId
+  readonly internalConnectionId: ConnectionId
   readonly extensionService: ExtensionService
   readonly activation: ExtensionActivationCoordinator
   readonly installation: HostExtensionInstallationCoordinator
@@ -205,13 +148,11 @@ export class NekroRuntime {
     { readonly episodesClosed: number; readonly admissionsReleased: number } | undefined
   readonly #database: CoreDatabase
   readonly #now: () => number
-  readonly #qqOptions: NonNullable<NekroRuntimeOptions['qq']>
   readonly adapters: AdapterRegistry
   readonly #adapterHandles: RegisteredAdapterHandle[] = []
   readonly #adapterRuntimes: Map<ConnectionId, AdapterConnectionRuntime>
   readonly #quiescingAdapterKeys = new Set<string>()
   readonly #adapterTransport: AdapterTransportService
-  readonly #qqDiagnostics = new Map<ConnectionId, QQConnectionDiagnostic>()
   readonly #adapterDiagnostics = new Map<ConnectionId, AdapterConnectionDiagnostic>()
   readonly #connectionTests = new Map<
     ConnectionId,
@@ -230,7 +171,7 @@ export class NekroRuntime {
     ConnectionId,
     { readonly channelId: ChannelId; readonly platformMessageId?: string; readonly receivedAt: number }
   >()
-  readonly #connectionListeners = new Set<() => void>()
+  readonly #connectionListeners = new Set<(event?: ConnectionEventRecord) => void>()
   readonly #agents = new Map<AgentId, AgentEntity>()
   readonly #unsubscribeDynamicApproval: () => void
   #started = false
@@ -244,8 +185,7 @@ export class NekroRuntime {
     readonly core: CoreService
     readonly host: DshHostRuntime
     readonly channels: ChannelRuntime
-    readonly web: WebAdapterConnection
-    readonly webConnectionId: ConnectionId
+    readonly internalConnectionId: ConnectionId
     readonly extensionService: ExtensionService
     readonly activation: ExtensionActivationCoordinator
     readonly extensionBuilder: ExtensionBuilder
@@ -256,8 +196,8 @@ export class NekroRuntime {
     readonly sessionStoragePreparation: DshSessionStoragePreparation
     readonly sessionStorageRetirement?: { readonly episodesClosed: number; readonly admissionsReleased: number }
     readonly now: () => number
-    readonly qqOptions: NonNullable<NekroRuntimeOptions['qq']>
     readonly adapters: AdapterRegistry
+    readonly adapterHandles: readonly RegisteredAdapterHandle[]
     readonly adapterRuntimes: Map<ConnectionId, AdapterConnectionRuntime>
     readonly adapterTransport: AdapterTransportService
   }) {
@@ -268,8 +208,7 @@ export class NekroRuntime {
     this.core = input.core
     this.host = input.host
     this.channels = input.channels
-    this.web = input.web
-    this.webConnectionId = input.webConnectionId
+    this.internalConnectionId = input.internalConnectionId
     this.extensionService = input.extensionService
     this.activation = input.activation
     this.credentials = input.credentials
@@ -279,21 +218,15 @@ export class NekroRuntime {
     this.sessionStoragePreparation = input.sessionStoragePreparation
     this.sessionStorageRetirement = input.sessionStorageRetirement
     this.#now = input.now
-    this.#qqOptions = input.qqOptions
     this.adapters = input.adapters
+    this.#adapterHandles.push(...input.adapterHandles)
     this.#adapterRuntimes = input.adapterRuntimes
     this.#adapterTransport = input.adapterTransport
-    this.#adapterDiagnostics.set(input.webConnectionId, {
+    this.#adapterDiagnostics.set(input.internalConnectionId, {
       status: 'connected',
       credentialConfigured: true,
       proactiveSend: true,
     })
-    this.#adapterHandles.push(
-      this.adapters.register('builtin:web', WEB_HOST_CONTRIBUTION),
-      this.adapters.register('builtin:qq-openclaw', this.#qqHostContribution()),
-      this.adapters.register('builtin:onebot-11', createOneBot11HostContribution()),
-      this.adapters.register('builtin:wecom-ai-bot', createWeComAiBotHostContribution()),
-    )
     this.installation = new HostExtensionInstallationCoordinator(
       this.repository,
       this.extensionService,
@@ -358,32 +291,35 @@ export class NekroRuntime {
       )
       const core = new CoreService(repository, { now, nextUlid })
       const adapters = new AdapterRegistry()
+      const adapterHandles = BUILTIN_ADAPTER_CONTRIBUTIONS.map((contribution, index) =>
+        adapters.register(`builtin:${index}`, contribution),
+      )
       const dshPluginInstaller = new DshPluginPackageInstaller(
         repository,
         options.dshPluginRoot ?? path.join(path.dirname(options.coreDatabasePath), 'dsh'),
         { now, nextUlid },
       )
       await dshPluginInstaller.initialize()
-      const webConnection =
-        core.listConnectionsByAdapter('web')[0] ?? core.createConnection({ adapterKey: 'web', config: {} })
-      const webConnectionId = webConnection.id
+      for (const contribution of adapters.list()) {
+        if (contribution.descriptor.provisioning !== 'system-singleton') continue
+        const existing = core.listConnectionsByAdapter(contribution.descriptor.key)
+        if (existing.length > 1) {
+          throw new Error(`System-singleton Adapter has multiple Connections: ${contribution.descriptor.key}`)
+        }
+        if (existing.length === 0) core.createConnection({ adapterKey: contribution.descriptor.key, config: {} })
+      }
+      const internalConnections = core.listConnections().filter((connection) => {
+        const descriptor = adapters.get(connection.adapterKey)?.descriptor
+        return descriptor?.provisioning === 'system-singleton' && descriptor.channelKinds.includes('internal')
+      })
+      if (internalConnections.length !== 1) {
+        throw new Error('Host requires exactly one system-singleton Adapter that provides internal Channels.')
+      }
+      const internalConnectionId = internalConnections[0]!.id
       const adapterRuntimes = new Map<ConnectionId, AdapterConnectionRuntime>()
 
-      // Channel Runtime and the Web Adapter reference each other lazily: the
-      // adapter edits inbound through acceptInbound, the runtime dispatches
-      // outbound through the adapter. Use a settled pointer bridge exactly as
-      // the vertical-slice tests do.
+      // Adapter inbound and Channel Runtime delivery reference each other lazily.
       const settled: { current?: ChannelRuntime } = {}
-
-      const web = createWebAdapterConnection(
-        webConnectionId,
-        (event) => {
-          if (!settled.current) return Promise.reject(new Error('Channel Runtime is not ready.'))
-          return settled.current.acceptInbound(event)
-        },
-        now,
-      )
-      adapterRuntimes.set(webConnectionId, web)
 
       const host = await DshHostRuntime.create({
         sessionDatabasePath: options.sessionDatabasePath,
@@ -439,8 +375,44 @@ export class NekroRuntime {
         now,
         nextUlid,
         idleRolloverMs: options.idleRolloverMs ?? 6 * 60 * 60 * 1000,
-        resolveAdapter: (id): AdapterConnectionRuntime | undefined =>
-          id === webConnectionId ? web : adapterRuntimes.get(id),
+        resolveAdapter: (id): AdapterConnectionRuntime | undefined => adapterRuntimes.get(id),
+        isActivityTriggerAllowed: (channelId, activityKey) => {
+          const channel = core.getChannel(channelId)
+          if (!channel) return false
+          const connection = core.getConnection(channel.connectionId)
+          const descriptor = connection ? adapters.get(connection.adapterKey)?.descriptor : undefined
+          const definition = descriptor?.activities.find((activity) => activity.key === activityKey)
+          const capability = adapterRuntimes.get(channel.connectionId)?.capabilities.activities[activityKey]
+          return (
+            definition?.scope === 'channel' &&
+            definition.triggerable &&
+            definition.channelKinds?.includes(channel.kind) === true &&
+            capability?.state !== 'disabled' &&
+            capability?.state !== 'unsupported'
+          )
+        },
+        isActivityTriggerEnabledByDefault: (channelId, activityKey) => {
+          const channel = core.getChannel(channelId)
+          const connection = channel ? core.getConnection(channel.connectionId) : undefined
+          return connection?.activityTriggerDefaults.includes(activityKey) === true
+        },
+        validateActivityTriggerOverrides: (channelId, overrides) => {
+          const channel = core.getChannel(channelId)
+          if (!channel) throw new Error('频道不存在。')
+          const connection = core.getConnection(channel.connectionId)
+          const descriptor = connection ? adapters.get(connection.adapterKey)?.descriptor : undefined
+          if (!descriptor) return
+          for (const activityKey of Object.keys(overrides)) {
+            const definition = descriptor.activities.find((activity) => activity.key === activityKey)
+            if (
+              definition?.scope !== 'channel' ||
+              !definition.triggerable ||
+              definition.channelKinds?.includes(channel.kind) !== true
+            ) {
+              throw new Error(`当前频道不支持活动触发：${activityKey}`)
+            }
+          }
+        },
         adapterState: repository,
       })
       settled.current = channels
@@ -489,8 +461,7 @@ export class NekroRuntime {
         core,
         host,
         channels,
-        web,
-        webConnectionId,
+        internalConnectionId,
         extensionService,
         activation,
         extensionBuilder,
@@ -501,8 +472,8 @@ export class NekroRuntime {
         sessionStoragePreparation,
         ...(sessionStorageRetirement === undefined ? {} : { sessionStorageRetirement }),
         now,
-        qqOptions: options.qq ?? {},
         adapters,
+        adapterHandles,
         adapterRuntimes,
         adapterTransport: options.adapterTransport ?? createProductionAdapterTransport(),
       })
@@ -513,12 +484,24 @@ export class NekroRuntime {
     }
   }
 
-  /** Start the Web Adapter so HTTP-posted messages can be admitted. */
+  /** Start system-managed Adapters so internal messages can be admitted. */
   async start(): Promise<void> {
     if (this.#disposed) throw new Error('NekroRuntime is disposed.')
     if (this.#started) throw new Error('NekroRuntime is already started.')
     this.#started = true
-    await this.web.start()
+    for (const connection of this.core.listConnections()) {
+      const descriptor = this.adapters.get(connection.adapterKey)?.descriptor
+      if (descriptor?.provisioning === 'system-singleton') await this.#mountAdapter(connection.id)
+    }
+    if (!this.#adapterRuntimes.get(this.internalConnectionId)?.localChannel) {
+      throw new Error('The internal Channel Adapter did not provide a localChannel port.')
+    }
+  }
+
+  get internalChannel(): AdapterLocalChannelPort {
+    const port = this.#adapterRuntimes.get(this.internalConnectionId)?.localChannel
+    if (!port) throw new Error('The internal Channel runtime is unavailable.')
+    return port
   }
 
   async removeDshPluginPackage(packageId: DshPluginPackageId): Promise<void> {
@@ -613,21 +596,21 @@ export class NekroRuntime {
    * Closed-loop A primitive: create an intelligent-agent, ensure a Web Channel
    * for it, and bind them with `always` so every Web message triggers a reply.
    */
-  async createAgentWithWebChannel(content: AgentRevisionContent): Promise<AgentEntity> {
+  async createAgentWithInternalChannel(content: AgentRevisionContent): Promise<AgentEntity> {
     const models = await this.host.listAvailableLlmModels()
     if (!models.some((model) => model.provider === content.model.provider && model.id === content.model.model)) {
       throw new Error(`模型未在当前 DSH Provider 目录注册：${content.model.provider}/${content.model.model}`)
     }
     const agent = this.core.createAgentWithChannel(content, {
-      connectionId: this.webConnectionId,
-      kind: 'web',
+      connectionId: this.internalConnectionId,
+      kind: 'internal',
       displayName: `${content.displayName.trim()} 的内置频道`,
       triggerPolicy: 'always',
     })
     const entity: AgentEntity = {
       agentId: agent.definition.id,
       channelId: agent.channel.id,
-      connectionId: this.webConnectionId,
+      connectionId: this.internalConnectionId,
       revisionId: agent.revision.id,
       createdAt: agent.definition.createdAt,
     }
@@ -650,7 +633,7 @@ export class NekroRuntime {
       .flatMap((connection) => this.core.listChannelsByConnection(connection.id))
       .filter((channel) => this.repository.getBinding(channel.id)?.agentId === agentId)
     const channelsToDelete = options.deleteAutoCreatedBuiltInChannels
-      ? boundChannels.filter((channel) => channel.kind === 'web' && channel.autoCreatedForAgentId === agentId)
+      ? boundChannels.filter((channel) => channel.kind === 'internal' && channel.autoCreatedForAgentId === agentId)
       : []
     const deletedChannelIds = channelsToDelete.map((channel) => channel.id)
     const deletedChannelIdSet = new Set(deletedChannelIds)
@@ -750,27 +733,9 @@ export class NekroRuntime {
     }
   }
 
-  subscribeConnectionChanges(listener: () => void): () => void {
+  subscribeConnectionChanges(listener: (event?: ConnectionEventRecord) => void): () => void {
     this.#connectionListeners.add(listener)
     return () => this.#connectionListeners.delete(listener)
-  }
-
-  connectionDiagnostic(connectionId: ConnectionId): QQConnectionDiagnostic | undefined {
-    const legacy = this.#qqDiagnostics.get(connectionId)
-    if (legacy) return legacy
-    const diagnostic = this.#adapterDiagnostics.get(connectionId)
-    if (!diagnostic) return undefined
-    const tests = this.#connectionTests.get(connectionId)
-    return {
-      gateway: {
-        state: diagnostic.status,
-        ...(diagnostic.message === undefined ? {} : { lastError: diagnostic.message }),
-      },
-      credentialConfigured: diagnostic.credentialConfigured ?? false,
-      knownChannelIds: this.core.listChannelsByConnection(connectionId).map((channel) => channel.id),
-      ...(tests?.receive === undefined ? {} : { receiveTest: tests.receive }),
-      ...(tests?.send === undefined ? {} : { sendTest: tests.send }),
-    }
   }
 
   adapterConnectionDiagnostic(connectionId: ConnectionId): AdapterConnectionDiagnostic | undefined {
@@ -812,7 +777,7 @@ export class NekroRuntime {
   }) {
     if (!this.#started || this.#disposed) throw new Error('NekroRuntime is not accepting new Connections.')
     const contribution = this.adapters.get(input.adapterKey)
-    if (!contribution?.descriptor.userCreatable) throw new Error('该连接平台不可由用户创建。')
+    if (contribution?.descriptor.provisioning !== 'user-created') throw new Error('该连接平台不可由用户创建。')
     const descriptor = contribution.descriptor
     const configurationInput = input.configuration ?? {}
     const credentialsInput = input.credentials ?? {}
@@ -865,21 +830,6 @@ export class NekroRuntime {
     }
   }
 
-  async createQQConnection(input: QQOpenClawConnectionInput, alias?: string) {
-    return this.createConnection({
-      adapterKey: QQ_OPENCLAW_CONNECTION_DEFINITION.descriptor.key,
-      ...(alias === undefined ? {} : { alias }),
-      configuration: {
-        appId: input.appId,
-        proactiveSend: input.proactiveSend ?? false,
-        markdown: input.markdown ?? true,
-        maxTextLength: input.maxTextLength ?? 1800,
-        maxTextBytes: input.maxTextBytes ?? 7200,
-      },
-      credentials: { clientSecretCredentialRef: input.clientSecret },
-    })
-  }
-
   updateConnectionAlias(connectionId: ConnectionId, alias?: string): ConnectionRecord {
     if (this.#disposed) throw new Error('NekroRuntime is disposed.')
     const connection = this.core.getConnection(connectionId)
@@ -889,6 +839,78 @@ export class NekroRuntime {
     const updated = this.core.updateConnectionAlias(connectionId, alias)
     this.#notifyConnectionChanges()
     return updated
+  }
+
+  updateConnectionActivityTriggerDefaults(
+    connectionId: ConnectionId,
+    activityKeys: readonly AdapterActivityKey[],
+  ): ConnectionRecord {
+    if (this.#disposed) throw new Error('NekroRuntime is disposed.')
+    const connection = this.core.getConnection(connectionId)
+    if (!connection) throw new Error('连接不存在。')
+    const descriptor = this.adapters.get(connection.adapterKey)?.descriptor
+    if (!descriptor) throw new Error('这个连接的适配器未安装，无法修改活动默认值。')
+    if (new Set(activityKeys).size !== activityKeys.length) throw new Error('连接活动默认值不能包含重复项。')
+    for (const activityKey of activityKeys) {
+      const definition = descriptor.activities.find((activity) => activity.key === activityKey)
+      const capability = this.connectionCapabilities(connectionId)?.activities[activityKey]
+      if (
+        definition?.scope !== 'channel' ||
+        !definition.triggerable ||
+        capability?.state === 'disabled' ||
+        capability?.state === 'unsupported'
+      ) {
+        throw new Error(`当前连接不支持活动触发：${activityKey}`)
+      }
+    }
+    const updated = this.core.updateConnectionActivityTriggerDefaults(connectionId, activityKeys)
+    this.#notifyConnectionChanges()
+    return updated
+  }
+
+  async deleteConnection(
+    connectionId: ConnectionId,
+    options: { readonly deleteChannelData: boolean },
+  ): Promise<{ readonly archived: boolean }> {
+    if (this.#disposed) throw new Error('NekroRuntime is disposed.')
+    if (connectionId === this.internalConnectionId) throw new Error('系统托管连接不能删除。')
+    const connection = this.core.getConnection(connectionId) ?? this.repository.getArchivedConnection(connectionId)
+    if (!connection) throw new Error('连接不存在。')
+    const active = this.core.getConnection(connectionId)
+    if (active) {
+      for (const channel of this.core.listChannelsByConnection(connectionId))
+        await this.channels.suspendChannel(channel.id)
+      await this.channels.waitUntilConnectionsSafe([connectionId])
+      const runtime = this.#adapterRuntimes.get(connectionId)
+      await runtime?.stop()
+      this.#adapterRuntimes.delete(connectionId)
+    }
+    this.#adapterDiagnostics.delete(connectionId)
+    this.#connectionTests.delete(connectionId)
+    if (options.deleteChannelData) {
+      this.core.purgeConnection(connectionId)
+      await Promise.allSettled(
+        Object.values(connection.credentialRefs).map((reference) => this.credentials.delete(reference)),
+      )
+      this.#notifyConnectionChanges()
+      return { archived: false }
+    }
+    if (active) this.core.archiveConnection(connectionId)
+    this.#notifyConnectionChanges()
+    return { archived: true }
+  }
+
+  async restoreConnection(connectionId: ConnectionId): Promise<ConnectionRecord> {
+    if (!this.#started || this.#disposed) throw new Error('NekroRuntime is not accepting restored Connections.')
+    const archived = this.repository.getArchivedConnection(connectionId)
+    if (!archived) throw new Error('可恢复的连接不存在。')
+    if (this.adapters.get(archived.adapterKey)?.descriptor.provisioning !== 'user-created') {
+      throw new Error('这个连接当前无法恢复。')
+    }
+    const connection = this.core.restoreConnection(connectionId)
+    await this.#mountAdapter(connectionId)
+    this.#notifyConnectionChanges()
+    return connection
   }
 
   async testConnection(
@@ -967,16 +989,12 @@ export class NekroRuntime {
 
   #recordConnectionTest(connectionId: ConnectionId, direction: 'send' | 'receive', result: ConnectionTestResult): void {
     this.#connectionTests.set(connectionId, { ...this.#connectionTests.get(connectionId), [direction]: result })
-    const current = this.#qqDiagnostics.get(connectionId)
-    if (!current) return
-    this.#setQQDiagnostic(connectionId, {
-      ...current,
-      ...(direction === 'send' ? { sendTest: result } : { receiveTest: result }),
-    })
+    this.#notifyConnectionChanges()
   }
 
-  registerAdapter(owner: string, contribution: AdapterHostContributionV1): Promise<RegisteredAdapterHandle> {
+  registerAdapter(owner: string, contribution: AdapterHostContributionV2): Promise<RegisteredAdapterHandle> {
     const registered = this.adapters.register(owner, contribution)
+    this.#cleanAdapterBindings(contribution.descriptor.key)
     this.#notifyConnectionChanges()
     return Promise.resolve({
       ...registered,
@@ -1058,6 +1076,7 @@ export class NekroRuntime {
       this.#notifyConnectionChanges()
       return
     }
+    this.#cleanConnectionBindings(connectionId, contribution)
     let credentialsAvailable = true
     try {
       for (const reference of Object.values(connection.credentialRefs)) {
@@ -1077,18 +1096,33 @@ export class NekroRuntime {
         configuration,
         credentialRefs: connection.credentialRefs,
       })
+      const capabilities = parseAdapterCapabilities(runtime.capabilities)
+      const declaredActivityKeys = new Set(contribution.descriptor.activities.map((activity) => activity.key))
+      const capabilityKeys = Object.keys(capabilities.activities)
+      if (
+        capabilityKeys.some((key) => !declaredActivityKeys.has(key)) ||
+        contribution.descriptor.activities.some((activity) => capabilities.activities[activity.key] === undefined)
+      ) {
+        throw new Error('Adapter runtime activity capabilities do not match its Descriptor.')
+      }
+      if (
+        (contribution.descriptor.features.processingFeedback === undefined) !==
+        (capabilities.processingFeedback === undefined)
+      ) {
+        throw new Error('Adapter runtime processing-feedback capability does not match its Descriptor.')
+      }
       this.#adapterRuntimes.set(connectionId, runtime)
       this.#adapterDiagnostics.set(connectionId, {
         status: 'connecting',
         credentialConfigured: Object.keys(connection.credentialRefs).length > 0,
-        proactiveSend: runtime.capabilities.proactiveSend,
+        proactiveSend: runtime.capabilities.outbound.proactiveSend,
       })
       await runtime.start()
       if (this.#adapterDiagnostics.get(connectionId)?.status === 'connecting') {
         this.#adapterDiagnostics.set(connectionId, {
           status: 'connected',
           credentialConfigured: Object.keys(connection.credentialRefs).length > 0,
-          proactiveSend: runtime.capabilities.proactiveSend,
+          proactiveSend: runtime.capabilities.outbound.proactiveSend,
         })
       }
     } catch (error) {
@@ -1104,21 +1138,104 @@ export class NekroRuntime {
     this.#notifyConnectionChanges()
   }
 
+  #cleanAdapterBindings(adapterKey: string): void {
+    const contribution = this.adapters.get(adapterKey)
+    if (!contribution) return
+    for (const connectionId of this.repository.listConnectionIdsByAdapter(adapterKey)) {
+      this.#cleanConnectionBindings(connectionId, contribution)
+    }
+  }
+
+  #cleanConnectionBindings(connectionId: ConnectionId, contribution: AdapterHostContributionV2): void {
+    const connection = this.core.getConnection(connectionId)
+    if (connection) {
+      const activityTriggerDefaults = connection.activityTriggerDefaults.filter((key) => {
+        const definition = contribution.descriptor.activities.find((activity) => activity.key === key)
+        return definition?.scope === 'channel' && definition.triggerable
+      })
+      if (activityTriggerDefaults.length !== connection.activityTriggerDefaults.length) {
+        this.repository.updateConnectionActivityTriggerDefaults(connectionId, activityTriggerDefaults)
+      }
+    }
+    for (const channel of this.core.listChannelsByConnection(connectionId)) {
+      const binding = this.repository.getBinding(channel.id)
+      if (!binding) continue
+      const activityTriggerOverrides = Object.fromEntries(
+        Object.entries(binding.activityTriggerOverrides).filter(([key]) => {
+          const definition = contribution.descriptor.activities.find((activity) => activity.key === key)
+          return (
+            definition?.scope === 'channel' &&
+            definition.triggerable &&
+            definition.channelKinds?.includes(channel.kind) === true
+          )
+        }),
+      )
+      if (Object.keys(activityTriggerOverrides).length !== Object.keys(binding.activityTriggerOverrides).length) {
+        this.repository.replaceBinding({ ...binding, activityTriggerOverrides })
+      }
+    }
+  }
+
   #adapterContext(connectionId: ConnectionId): AdapterConnectionHostContext {
+    const rejectEvent = (message: string): never => {
+      const current = this.#adapterDiagnostics.get(connectionId)
+      this.#adapterDiagnostics.set(connectionId, {
+        status: current?.status ?? 'connected',
+        message,
+        credentialConfigured: current?.credentialConfigured ?? false,
+        proactiveSend: current?.proactiveSend ?? false,
+        details: { eventRejected: true },
+      })
+      this.#notifyConnectionChanges()
+      throw new Error(message)
+    }
+    const resolveOwnedDescriptor = (adapterKey: string) => {
+      const connection = this.core.getConnection(connectionId)
+      if (!connection || connection.adapterKey !== adapterKey) {
+        return rejectEvent('适配器提交的事件不属于当前连接。')
+      }
+      const descriptor = this.adapters.get(connection.adapterKey)?.descriptor
+      if (!descriptor) return rejectEvent('提交事件的适配器当前未注册。')
+      return descriptor
+    }
     return {
       connectionId,
       now: this.#now,
-      acceptInbound: async (event) => {
+      acceptChannelInbound: async (event) => {
+        if (event.connectionId !== connectionId) return rejectEvent('适配器提交了其他连接的频道事件。')
         const adapterKey = this.core.getConnection(connectionId)?.adapterKey
         if (adapterKey && this.#quiescingAdapterKeys.has(adapterKey)) {
           throw new Error('适配器正在进入安全间隙，暂不接收新的频道事件。')
+        }
+        const descriptor = resolveOwnedDescriptor(event.adapterKey)
+        const channel = this.core.getChannel(event.channelId)
+        if (!channel || channel.connectionId !== connectionId) {
+          return rejectEvent('适配器提交的频道事件不属于当前连接。')
+        }
+        if (event.activityKey !== undefined) {
+          const activity = descriptor.activities.find((candidate) => candidate.key === event.activityKey)
+          if (activity?.scope !== 'channel') return rejectEvent(`适配器提交了未声明的频道活动：${event.activityKey}`)
+          if (activity.channelKinds?.includes(channel.kind) !== true) {
+            return rejectEvent(`频道活动 ${event.activityKey} 不适用于当前频道类型。`)
+          }
         }
         this.#lastInboundByConnection.set(connectionId, {
           channelId: event.channelId,
           ...(event.platformMessageId === undefined ? {} : { platformMessageId: event.platformMessageId }),
           receivedAt: event.receivedAt,
         })
-        return this.channels.acceptInbound(event)
+        return this.channels.acceptChannelInbound(event)
+      },
+      acceptConnectionInbound: (event) => {
+        if (event.connectionId !== connectionId) return rejectEvent('适配器提交了其他连接的连接活动。')
+        const descriptor = resolveOwnedDescriptor(event.adapterKey)
+        const activity = descriptor.activities.find((candidate) => candidate.key === event.activityKey)
+        if (activity?.scope !== 'connection') {
+          return rejectEvent(`适配器提交了未声明的连接活动：${event.activityKey}`)
+        }
+        const commit = this.core.appendConnectionInbound(event)
+        if (commit.inserted) this.#notifyConnectionChanges(commit.event)
+        return Promise.resolve({ connectionEventId: commit.event.id, inserted: commit.inserted })
       },
       channels: {
         ensure: (input) =>
@@ -1145,9 +1262,20 @@ export class NekroRuntime {
         resolveKind: (channelId) => {
           const channel = this.core.getChannel(channelId)
           return Promise.resolve(
-            channel?.connectionId !== connectionId || channel.kind === 'web' ? undefined : channel.kind,
+            channel?.connectionId !== connectionId || channel.kind === 'internal' ? undefined : channel.kind,
           )
         },
+      },
+      identities: {
+        ensure: (input) =>
+          Promise.resolve(
+            this.core.ensurePlatformIdentity({
+              connectionId,
+              platformUserId: input.platformUserId,
+              ...(input.displayName === undefined ? {} : { displayName: input.displayName }),
+              observedAt: input.observedAt,
+            }).id,
+          ),
       },
       members: {
         ensure: (input) =>
@@ -1205,7 +1333,7 @@ export class NekroRuntime {
           this.#adapterDiagnostics.set(connectionId, {
             ...diagnostic,
             credentialConfigured: Object.keys(this.core.getConnection(connectionId)?.credentialRefs ?? {}).length > 0,
-            proactiveSend: this.#adapterRuntimes.get(connectionId)?.capabilities.proactiveSend ?? false,
+            proactiveSend: this.#adapterRuntimes.get(connectionId)?.capabilities.outbound.proactiveSend ?? false,
           })
           this.#notifyConnectionChanges()
         },
@@ -1214,107 +1342,10 @@ export class NekroRuntime {
     }
   }
 
-  #qqHostContribution(): AdapterHostContributionV1 {
-    return {
-      apiVersion: 1,
-      descriptor: QQ_OPENCLAW_CONNECTION_DEFINITION.descriptor,
-      create: (context, stored) => {
-        const connectionId = context.connectionId
-        const config = StoredQQConnectionConfigSchema.parse(stored.configuration)
-        const credentialReference = stored.credentialRefs['clientSecret']
-        if (!credentialReference) throw new Error('这个连接的凭据不可用。')
-        const transport = new QQOpenClawHttpTransport({
-          appId: config.appId,
-          clientSecretCredentialRef: credentialReference,
-          credentials: this.credentials,
-          ...(this.#qqOptions.fetch === undefined ? {} : { fetch: this.#qqOptions.fetch }),
-          now: this.#now,
-        })
-        const bridge = new QQCoreBridge(
-          this.core,
-          new QQRemoteAssetImporter(this.assetService, {
-            ...(this.#qqOptions.fetch === undefined ? {} : { fetch: this.#qqOptions.fetch }),
-          }),
-        )
-        const runtime = new QQOpenClawRuntime({
-          context: {
-            ...context,
-            acceptInbound: async (event) => {
-              const result = await context.acceptInbound(event)
-              if (event.platformMessageId) {
-                this.#setQQDiagnostic(connectionId, {
-                  gateway: this.#qqDiagnostics.get(connectionId)?.gateway ?? { state: 'connected' },
-                  credentialConfigured: true,
-                  knownChannelIds: this.core.listChannelsByConnection(connectionId).map((channel) => channel.id),
-                  lastInbound: {
-                    channelId: event.channelId,
-                    platformMessageId: event.platformMessageId,
-                    receivedAt: event.receivedAt,
-                  },
-                })
-              }
-              return result
-            },
-          },
-          config: {
-            appId: config.appId,
-            clientSecretCredentialRef: credentialReference,
-            proactiveSend: config.proactiveSend,
-            markdown: config.markdown,
-            maxTextLength: config.maxTextLength,
-            maxTextBytes: config.maxTextBytes,
-          },
-          directory: bridge,
-          inbound: bridge,
-          assets: {
-            read: async (assetId) => {
-              const asset = this.repository.getAssetById(assetId)
-              if (!asset) throw new Error('QQ outbound Asset is unavailable.')
-              return {
-                bytes: new Uint8Array(await readFile(this.assetService.blobPath(asset))),
-                mediaType: asset.mediaType,
-              }
-            },
-          },
-          transport,
-          onQuoteDiagnostic: (diagnostic) => {
-            console.warn('[nekro-nxt] QQ 引用未解析：', JSON.stringify(diagnostic))
-          },
-          gateway: {
-            access: transport,
-            sockets: this.#qqOptions.sockets ?? new QQNodeWebSocketFactory(),
-            checkpoints: createQQGatewayCheckpointStore(connectionId, this.repository),
-            clock: this.#qqOptions.clock ?? systemGatewayClock(),
-            onStatus: (gateway) => {
-              this.#setQQDiagnostic(connectionId, {
-                ...this.#qqDiagnostics.get(connectionId),
-                gateway,
-                credentialConfigured: true,
-                knownChannelIds: this.core.listChannelsByConnection(connectionId).map((channel) => channel.id),
-              })
-            },
-          },
-        })
-        return Promise.resolve(runtime)
-      },
-    }
-  }
-
-  #setQQDiagnostic(connectionId: ConnectionId, diagnostic: QQConnectionDiagnostic): void {
-    this.#qqDiagnostics.set(connectionId, diagnostic)
-    this.#adapterDiagnostics.set(connectionId, {
-      status: diagnostic.gateway.state,
-      ...(diagnostic.gateway.lastError === undefined ? {} : { message: diagnostic.gateway.lastError }),
-      credentialConfigured: diagnostic.credentialConfigured,
-      proactiveSend: true,
-    })
-    this.#notifyConnectionChanges()
-  }
-
-  #notifyConnectionChanges(): void {
+  #notifyConnectionChanges(event?: ConnectionEventRecord): void {
     for (const listener of this.#connectionListeners) {
       try {
-        listener()
+        listener(event)
       } catch {
         // A diagnostic observer cannot interrupt the owned Connection lifecycle.
       }

@@ -1,7 +1,8 @@
-import type { AdapterInboundEvent } from '@nekro-nxt/adapter-sdk'
+import type { AdapterChannelInboundEvent, AdapterConnectionInboundEvent } from '@nekro-nxt/adapter-sdk'
 import type {
   AgentId,
   AgentRevisionId,
+  AdapterActivityKey,
   ChannelId,
   ChannelMemberId,
   ConnectionId,
@@ -19,11 +20,13 @@ import type {
   AgentDefinitionRecord,
   AgentRevisionRecord,
   AppendChannelEventCommit,
+  AppendConnectionEventCommit,
   BindingRecord,
   ChannelEventRecord,
   ChannelMemberRecord,
   ChannelRecord,
   ConnectionRecord,
+  ConnectionEventRecord,
   CoreRepository,
   CreateAgentCommit,
   CreateAgentWithChannelCommit,
@@ -52,9 +55,11 @@ class MemoryRepository implements CoreRepository {
   readonly agents = new Map<AgentId, CreateAgentCommit>()
   readonly revisions = new Map<AgentRevisionId, AgentRevisionRecord>()
   readonly connections = new Map<ConnectionId, ConnectionRecord>()
+  readonly archivedConnections = new Map<ConnectionId, { record: ConnectionRecord; archivedAt: number }>()
   readonly channels = new Map<ChannelId, ChannelRecord>()
   readonly bindings: BindingRecord[] = []
   readonly events = new Map<string, ChannelEventRecord>()
+  readonly connectionEvents = new Map<string, ConnectionEventRecord>()
   readonly identities = new Map<PlatformIdentityId, PlatformIdentityRecord>()
   readonly members = new Map<ChannelMemberId, ChannelMemberRecord>()
 
@@ -145,11 +150,43 @@ class MemoryRepository implements CoreRepository {
         adapterKey: current.adapterKey,
         config: current.config,
         credentialRefs: current.credentialRefs,
+        activityTriggerDefaults: current.activityTriggerDefaults,
         createdAt: current.createdAt,
       })
     } else {
       this.connections.set(id, { ...current, alias })
     }
+  }
+  updateConnectionActivityTriggerDefaults(
+    id: ConnectionId,
+    activityTriggerDefaults: readonly AdapterActivityKey[],
+  ): void {
+    const current = this.connections.get(id)
+    if (!current) throw new Error(`Unknown connection: ${id}`)
+    this.connections.set(id, { ...current, activityTriggerDefaults })
+  }
+  archiveConnection(id: ConnectionId, archivedAt: number): void {
+    const record = this.connections.get(id)
+    if (!record) throw new Error(`Unknown connection: ${id}`)
+    this.connections.delete(id)
+    this.archivedConnections.set(id, { record, archivedAt })
+  }
+  restoreConnection(id: ConnectionId): void {
+    const archived = this.archivedConnections.get(id)
+    if (!archived) throw new Error(`Unknown archived connection: ${id}`)
+    this.archivedConnections.delete(id)
+    this.connections.set(id, archived.record)
+  }
+  purgeConnection(id: ConnectionId): void {
+    if (!this.connections.delete(id) && !this.archivedConnections.delete(id))
+      throw new Error(`Unknown connection: ${id}`)
+  }
+  getArchivedConnection(id: ConnectionId) {
+    const archived = this.archivedConnections.get(id)
+    return archived ? { ...archived.record, archivedAt: archived.archivedAt } : undefined
+  }
+  listArchivedConnections() {
+    return [...this.archivedConnections.values()].map(({ record, archivedAt }) => ({ ...record, archivedAt }))
   }
 
   getConnection(id: ConnectionId) {
@@ -284,6 +321,30 @@ class MemoryRepository implements CoreRepository {
     if (existing) return { event: existing, inserted: false }
     this.events.set(key, candidate)
     return { event: candidate, inserted: true }
+  }
+
+  appendConnectionEvent(candidate: ConnectionEventRecord): AppendConnectionEventCommit {
+    const key = `${candidate.connectionId}:${candidate.dedupeKey}`
+    const existing = this.connectionEvents.get(key)
+    if (existing) return { event: existing, inserted: false }
+    this.connectionEvents.set(key, candidate)
+    return { event: candidate, inserted: true }
+  }
+
+  listConnectionEvents(
+    connectionId: ConnectionId,
+    options: Parameters<CoreRepository['listConnectionEvents']>[1] = {},
+  ) {
+    return [...this.connectionEvents.values()]
+      .filter(
+        (event) =>
+          event.connectionId === connectionId &&
+          (options.before === undefined ||
+            event.receivedAt < options.before.receivedAt ||
+            (event.receivedAt === options.before.receivedAt && event.id < options.before.id)),
+      )
+      .sort((left, right) => right.receivedAt - left.receivedAt || right.id.localeCompare(left.id))
+      .slice(0, options.limit ?? 50)
   }
 
   getChannelEvent(id: ChannelEventRecord['id']) {
@@ -489,21 +550,21 @@ describe('CoreService', () => {
       persona: '',
       model: { provider: 'deepseek', model: 'v4' },
     })
-    const connection = core.createConnection({ adapterKey: 'web', config: {}, credentialRefs: {} })
+    const connection = core.createConnection({ adapterKey: 'fixture-alpha', config: {}, credentialRefs: {} })
     const channel = core.createChannel({
       connectionId: connection.id,
       platformChannelId: 'local-main',
-      kind: 'web',
+      kind: 'internal',
       displayName: '默认频道',
     })
     expect(
       core.createBinding({ channelId: channel.id, agentId: agent.definition.id, triggerPolicy: 'always' }),
     ).toMatchObject({ triggerPolicy: 'always' })
 
-    const event: AdapterInboundEvent = {
+    const event: AdapterChannelInboundEvent = {
       connectionId: connection.id,
       channelId: channel.id,
-      adapterKey: 'web',
+      adapterKey: 'fixture-alpha',
       platformEventId: 'web-event-1',
       kind: 'message-created',
       parts: [{ type: 'text', text: '你好' }],
@@ -536,6 +597,42 @@ describe('CoreService', () => {
     expect(() => core.updateConnectionAlias(created.id, 'a'.repeat(81))).toThrow()
   })
 
+  it('stores Connection activity defaults and archives or restores the same durable identity', () => {
+    let now = 100
+    const repository = new MemoryRepository()
+    const core = new CoreService(repository, { now: () => now, nextUlid: () => 'CONNECTIONSETTINGS' })
+    const connection = core.createConnection({ adapterKey: 'fixture-alpha', config: {}, alias: '可恢复连接' })
+    expect(connection.activityTriggerDefaults).toEqual([])
+
+    expect(core.updateConnectionActivityTriggerDefaults(connection.id, ['member-changed'])).toMatchObject({
+      activityTriggerDefaults: ['member-changed'],
+    })
+    expect(() =>
+      core.updateConnectionActivityTriggerDefaults(connection.id, ['member-changed', 'member-changed']),
+    ).toThrow('must be unique')
+
+    now = 200
+    expect(core.archiveConnection(connection.id)).toMatchObject({ id: connection.id, archivedAt: 200 })
+    expect(core.getConnection(connection.id)).toBeUndefined()
+    expect(core.listArchivedConnections()).toHaveLength(1)
+    expect(core.restoreConnection(connection.id)).toMatchObject({
+      id: connection.id,
+      alias: '可恢复连接',
+      activityTriggerDefaults: ['member-changed'],
+    })
+    expect(core.listArchivedConnections()).toEqual([])
+
+    const activeConnection = core.createConnection({ adapterKey: 'fixture-beta', config: {} })
+    expect(() => core.purgeConnection(activeConnection.id)).not.toThrow()
+    expect(core.getConnection(activeConnection.id)).toBeUndefined()
+
+    const missing = ConnectionIdSchema.parse('con_MISSINGCONNECTION')
+    expect(() => core.updateConnectionActivityTriggerDefaults(missing, [])).toThrow('Unknown connection')
+    expect(() => core.archiveConnection(missing)).toThrow('Unknown connection')
+    expect(() => core.restoreConnection(missing)).toThrow('Unknown archived connection')
+    expect(() => core.purgeConnection(missing)).toThrow('Unknown connection')
+  })
+
   it('allows one agent to bind multiple channels while each channel keeps one agent', () => {
     const repository = new MemoryRepository()
     let id = 0
@@ -545,9 +642,9 @@ describe('CoreService', () => {
       persona: '',
       model: { provider: 'deepseek', model: 'v4' },
     })
-    const connection = core.createConnection({ adapterKey: 'web', config: {} })
-    const first = core.createChannel({ connectionId: connection.id, platformChannelId: 'first', kind: 'web' })
-    const second = core.createChannel({ connectionId: connection.id, platformChannelId: 'second', kind: 'web' })
+    const connection = core.createConnection({ adapterKey: 'fixture-alpha', config: {} })
+    const first = core.createChannel({ connectionId: connection.id, platformChannelId: 'first', kind: 'internal' })
+    const second = core.createChannel({ connectionId: connection.id, platformChannelId: 'second', kind: 'internal' })
     core.createBinding({ channelId: first.id, agentId: agent.definition.id, triggerPolicy: 'always' })
     core.createBinding({ channelId: second.id, agentId: agent.definition.id, triggerPolicy: 'command' })
     expect(core.listBindings(first.id)).toEqual([
@@ -625,25 +722,103 @@ describe('CoreService', () => {
     expect(core.resolveChannelMemberIdentity(secondConnection.id, firstChannel.id, repeated.member.id)).toBeUndefined()
   })
 
-  it('creates an agent with a default Web Channel and lists only existing matching connections', () => {
+  it('keeps Connection events owned, idempotent, paginated, and outside Channels', () => {
+    const repository = new MemoryRepository()
+    let id = 0
+    const core = new CoreService(repository, { now: () => 100, nextUlid: () => `CONNECTION${++id}` })
+    const connection = core.createConnection({ adapterKey: 'fixture-alpha', config: {} })
+    const otherConnection = core.createConnection({ adapterKey: 'fixture-beta', config: {} })
+    const actor = core.ensurePlatformIdentity({
+      connectionId: connection.id,
+      platformUserId: 'actor-alpha',
+      displayName: '参与者甲',
+      observedAt: 100,
+    })
+    const subject = core.ensurePlatformIdentity({
+      connectionId: connection.id,
+      platformUserId: 'subject-alpha',
+      displayName: '参与者乙',
+      observedAt: 100,
+    })
+    const foreignIdentity = core.ensurePlatformIdentity({
+      connectionId: otherConnection.id,
+      platformUserId: 'foreign',
+      observedAt: 100,
+    })
+    const event: AdapterConnectionInboundEvent = {
+      connectionId: connection.id,
+      adapterKey: 'fixture-alpha',
+      activityKey: 'account-signal',
+      summary: '账号收到一条连接级活动。',
+      actorIdentityId: actor.id,
+      subjectIdentityId: subject.id,
+      sourceTimestamp: 200,
+      receivedAt: 300,
+      dedupeKey: 'connection-event-1',
+      facts: { count: 1 },
+    }
+
+    const first = core.appendConnectionInbound(event)
+    expect(first).toMatchObject({ inserted: true, event: { summary: event.summary } })
+    expect(core.appendConnectionInbound({ ...event, summary: '重复载荷不覆盖原事实。' })).toEqual({
+      event: first.event,
+      inserted: false,
+    })
+    core.appendConnectionInbound({
+      ...event,
+      actorIdentityId: undefined,
+      subjectIdentityId: undefined,
+      receivedAt: 300,
+      dedupeKey: 'connection-event-2',
+    })
+    core.appendConnectionInbound({
+      ...event,
+      actorIdentityId: undefined,
+      subjectIdentityId: undefined,
+      receivedAt: 200,
+      dedupeKey: 'connection-event-3',
+    })
+
+    const firstPage = core.listConnectionEvents(connection.id, { limit: 2 })
+    expect(firstPage).toHaveLength(2)
+    expect(firstPage[0]!.receivedAt).toBe(300)
+    expect(firstPage[1]!.receivedAt).toBe(300)
+    const secondPage = core.listConnectionEvents(connection.id, {
+      limit: 2,
+      before: { receivedAt: firstPage[1]!.receivedAt, id: firstPage[1]!.id },
+    })
+    expect(secondPage.map(({ dedupeKey }) => dedupeKey)).toEqual(['connection-event-3'])
+    expect(core.listChannelsByConnection(connection.id)).toEqual([])
+    expect(core.listConnectionEvents(otherConnection.id)).toEqual([])
+
+    expect(() =>
+      core.appendConnectionInbound({ ...event, adapterKey: 'fixture-beta', dedupeKey: 'wrong-owner' }),
+    ).toThrow('does not own connection')
+    expect(() =>
+      core.appendConnectionInbound({ ...event, actorIdentityId: foreignIdentity.id, dedupeKey: 'wrong-identity' }),
+    ).toThrow('does not belong to connection')
+    expect(() => core.listConnectionEvents(ConnectionIdSchema.parse('con_missing'))).toThrow('Unknown connection')
+  })
+
+  it('creates an agent with a default internal Channel and lists only existing matching connections', () => {
     const repository = new MemoryRepository()
     let id = 0
     const core = new CoreService(repository, { now: () => 100, nextUlid: () => `ID${++id}` })
-    const connection = core.createConnection({ adapterKey: 'web', config: {} })
+    const connection = core.createConnection({ adapterKey: 'fixture-alpha', config: {} })
     const otherConnection = core.createConnection({ adapterKey: 'qq-openclaw', config: { account: 'two' } })
 
     expect(core.listConnections()).toEqual([connection, otherConnection])
-    expect(core.listConnectionsByAdapter('web')).toEqual([connection])
+    expect(core.listConnectionsByAdapter('fixture-alpha')).toEqual([connection])
 
     const commit = core.createAgentWithChannel(
       { displayName: '小奈', persona: '', model: { provider: 'deepseek', model: 'v4' } },
-      { connectionId: connection.id, kind: 'web', triggerPolicy: 'always' },
+      { connectionId: connection.id, kind: 'internal', triggerPolicy: 'always' },
     )
 
     expect(commit.channel).toMatchObject({
       connectionId: connection.id,
-      platformChannelId: `web-${commit.definition.id}`,
-      kind: 'web',
+      platformChannelId: `internal-${commit.definition.id}`,
+      kind: 'internal',
       autoCreatedForAgentId: commit.definition.id,
     })
     expect(core.getChannel(commit.channel.id)).toEqual(commit.channel)
@@ -656,7 +831,7 @@ describe('CoreService', () => {
     const repository = new MemoryRepository()
     let id = 0
     const core = new CoreService(repository, { now: () => 100, nextUlid: () => `DEL${++id}` })
-    const connection = core.createConnection({ adapterKey: 'web', config: {} })
+    const connection = core.createConnection({ adapterKey: 'fixture-alpha', config: {} })
     const agent = core.createAgent({
       displayName: '测试智能体',
       persona: '',
@@ -665,13 +840,13 @@ describe('CoreService', () => {
     const channel = core.createChannel({
       connectionId: connection.id,
       platformChannelId: 'delete-channel',
-      kind: 'web',
+      kind: 'internal',
     })
     core.createBinding({ channelId: channel.id, agentId: agent.definition.id, triggerPolicy: 'always' })
     const event = core.appendInbound({
       connectionId: connection.id,
       channelId: channel.id,
-      adapterKey: 'web',
+      adapterKey: 'fixture-alpha',
       kind: 'message-created',
       parts: [{ type: 'text', text: '保留事实' }],
       platformTimestamp: 100,
@@ -695,11 +870,13 @@ describe('CoreService', () => {
       core.createAgent({ displayName: ' ', persona: '', model: { provider: 'deepseek', model: 'v4' } }),
     ).toThrow()
     expect(() => core.createConnection({ adapterKey: 'Not valid', config: {} })).toThrow()
-    expect(() => core.createConnection({ adapterKey: 'web', config: {}, credentialRefs: { token: ' ' } })).toThrow()
+    expect(() =>
+      core.createConnection({ adapterKey: 'fixture-alpha', config: {}, credentialRefs: { token: ' ' } }),
+    ).toThrow()
     expect(() =>
       core.createAgentWithChannel(
         { displayName: '小奈', persona: '', model: { provider: 'deepseek', model: 'v4' } },
-        { connectionId: ConnectionIdSchema.parse('con_missing'), kind: 'web', triggerPolicy: 'always' },
+        { connectionId: ConnectionIdSchema.parse('con_missing'), kind: 'internal', triggerPolicy: 'always' },
       ),
     ).toThrow('Unknown connection')
     expect(() =>
@@ -753,8 +930,8 @@ describe('CoreService', () => {
     const repository = new MemoryRepository()
     let id = 0
     const core = new CoreService(repository, { now: () => 100, nextUlid: () => `ID${++id}` })
-    const connection = core.createConnection({ adapterKey: 'web', config: {} })
-    const otherConnection = core.createConnection({ adapterKey: 'web', config: {} })
+    const connection = core.createConnection({ adapterKey: 'fixture-alpha', config: {} })
+    const otherConnection = core.createConnection({ adapterKey: 'fixture-alpha', config: {} })
     const channel = core.createChannel({ connectionId: connection.id, platformChannelId: 'main', kind: 'group' })
     const otherChannel = core.createChannel({
       connectionId: otherConnection.id,
@@ -798,10 +975,10 @@ describe('CoreService', () => {
     ).toBeUndefined()
 
     const assetId = AssetIdSchema.parse('ast_image1')
-    const event: AdapterInboundEvent = {
+    const event: AdapterChannelInboundEvent = {
       connectionId: connection.id,
       channelId: channel.id,
-      adapterKey: 'web',
+      adapterKey: 'fixture-alpha',
       platformMessageId: 'platform-asset',
       kind: 'message-created',
       senderMemberId: member.member.id,
@@ -820,13 +997,13 @@ describe('CoreService', () => {
       core.appendInbound({
         connectionId: connection.id,
         channelId: channel.id,
-        adapterKey: 'web',
+        adapterKey: 'fixture-alpha',
         kind: 'message-created',
         senderMemberId: member.member.id,
         parts: [
           {
             type: 'rich',
-            adapterKey: 'web',
+            adapterKey: 'fixture-alpha',
             kind: 'card',
             summary: '分享摘要',
             title: '分享标题',

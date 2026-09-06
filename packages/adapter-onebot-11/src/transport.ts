@@ -332,7 +332,7 @@ export class OneBotWebSocketClient {
     this.#context.diagnostics.publish({
       status,
       ...(message === undefined ? {} : { message }),
-      ...(accountId === undefined ? {} : { accountId }),
+      ...(accountId === undefined ? {} : { accountReference: accountId }),
       ...(version === undefined
         ? {}
         : {

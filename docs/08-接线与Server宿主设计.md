@@ -29,7 +29,10 @@
 | 频道资源 | `GET /api/channels/:channelId/assets/:assetId` | 校验频道访问权后同源读取 |
 | 频道本地名称 | `POST /api/channels/:channelId/display-name` | 只改展示名 |
 | 创建连接 | `POST /api/connections` | 按已安装 Adapter schema 创建，可选保存 80 字符以内的连接别名 |
-| 修改连接别名 | `POST /api/connections/:connectionId/alias` | trim 后保存或清除非系统托管连接的别名；系统托管 Web 连接拒绝编辑 |
+| 修改连接别名 | `POST /api/connections/:connectionId/alias` | trim 后保存或清除用户连接的别名；系统托管连接拒绝编辑 |
+| 修改连接活动默认值 | `POST /api/connections/:connectionId/activity-trigger-defaults` | 保存这个具体 Connection 的可触发频道活动默认开启列表 |
+| 删除连接 | `DELETE /api/connections/:connectionId` | 显式提交 `deleteChannelData`；归档保留频道数据，永久删除则清理 Connection 范围事实 |
+| 恢复连接 | `POST /api/connections/:connectionId/restore` | 按原 Connection ID 恢复归档连接和频道数据并重新挂载 Adapter |
 | 创建绑定 | `POST /api/bindings` | 智能体可多频道；一频道一个当前智能体；已绑定时为换绑 |
 | 解除绑定 | `DELETE /api/bindings/:channelId` | 若该频道有活动工作则先 `stopEpisode`，再删除 Binding |
 | 工作树顺序 | `PUT /api/work-tree-order` | 智能体 / 频道展示序，未知 id 丢弃，新对象追加 |

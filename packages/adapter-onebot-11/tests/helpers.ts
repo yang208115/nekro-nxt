@@ -1,7 +1,8 @@
 import type {
   AdapterConnectionDiagnostic,
   AdapterConnectionHostContext,
-  AdapterInboundEvent,
+  AdapterConnectionInboundEvent,
+  AdapterChannelInboundEvent,
 } from '@nekro-nxt/adapter-sdk'
 import {
   AssetIdSchema,
@@ -9,6 +10,8 @@ import {
   ChannelIdSchema,
   ChannelMemberIdSchema,
   ConnectionIdSchema,
+  ConnectionEventIdSchema,
+  PlatformIdentityIdSchema,
   type JsonValue,
 } from '@nekro-nxt/contracts'
 import { FakeAdapterTransport } from '@nekro-nxt/test-harness'
@@ -22,19 +25,29 @@ export const waitFor = async (predicate: () => boolean, timeoutMs = 2_000): Prom
 }
 
 export const createFakeContext = () => {
-  const events: AdapterInboundEvent[] = []
+  const events: AdapterChannelInboundEvent[] = []
+  const connectionEvents: AdapterConnectionInboundEvent[] = []
   const diagnostics: AdapterConnectionDiagnostic[] = []
   const states = new Map<string, JsonValue>()
   const channels = new Map<string, ReturnType<typeof ChannelIdSchema.parse>>()
+  const identities = new Map<string, ReturnType<typeof PlatformIdentityIdSchema.parse>>()
   const members = new Map<string, ReturnType<typeof ChannelMemberIdSchema.parse>>()
   let channelSequence = 0
+  let identitySequence = 0
   let memberSequence = 0
   const context: AdapterConnectionHostContext = {
     connectionId: ConnectionIdSchema.parse('con_TEST1'),
     now: () => Date.now(),
-    acceptInbound: (event) => {
+    acceptChannelInbound: (event) => {
       events.push(event)
       return Promise.resolve({ channelEventId: ChannelEventIdSchema.parse(`evt_${events.length}`), inserted: true })
+    },
+    acceptConnectionInbound: (event) => {
+      connectionEvents.push(event)
+      return Promise.resolve({
+        connectionEventId: ConnectionEventIdSchema.parse(`cev_${connectionEvents.length}`),
+        inserted: true,
+      })
     },
     channels: {
       ensure: (input) => {
@@ -52,6 +65,15 @@ export const createFakeContext = () => {
         return Promise.resolve(
           platform?.startsWith('group:') ? 'group' : platform?.startsWith('private:') ? 'direct' : undefined,
         )
+      },
+    },
+    identities: {
+      ensure: (input) => {
+        const existing = identities.get(input.platformUserId)
+        if (existing) return Promise.resolve(existing)
+        const id = PlatformIdentityIdSchema.parse(`pid_${++identitySequence}`)
+        identities.set(input.platformUserId, id)
+        return Promise.resolve(id)
       },
     },
     members: {
@@ -105,5 +127,5 @@ export const createFakeContext = () => {
     },
     transport: new FakeAdapterTransport(),
   }
-  return { context, events, diagnostics, states, channels, members }
+  return { context, events, connectionEvents, diagnostics, states, channels, identities, members }
 }

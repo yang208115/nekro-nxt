@@ -1,0 +1,18 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": true,
+    "rootDir": "src",
+    "outDir": "lib/types",
+    "emitDeclarationOnly": true,
+    "tsBuildInfoFile": "lib/types.tsbuildinfo"
+  },
+  "include": ["src/**/*.ts"],
+  "references": [
+    { "path": "../adapter-sdk" },
+    { "path": "../adapter-web" },
+    { "path": "../adapter-onebot-11" },
+    { "path": "../adapter-wecom-ai-bot" },
+    { "path": "../adapter-qq-openclaw" }
+  ]
+}

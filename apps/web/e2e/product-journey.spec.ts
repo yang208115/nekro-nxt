@@ -421,8 +421,54 @@ test('settings saves a built-in provider credential without exposing it again', 
   expect(failures, failures.join('\n')).toEqual([])
 })
 
-test('adding a connection selects a platform before showing its fields', async ({ page }) => {
+test('adding a connection selects a platform before showing its fields', async ({ page, request }) => {
   const failures = installRuntimeFailureGate(page)
+  const baseResponse = await request.get('/api/snapshot')
+  expect(baseResponse.ok()).toBe(true)
+  const baseSnapshot = HostApiContracts.snapshot.response.parse(await baseResponse.json())
+  const snapshot = HostApiContracts.snapshot.response.parse({
+    ...baseSnapshot,
+    connectionAdapters: [
+      ...baseSnapshot.connectionAdapters.filter(({ provisioning }) => provisioning === 'system-singleton'),
+      {
+        key: 'fixture-beta',
+        displayName: '示例群聊平台',
+        description: '连接示例群聊平台账号。',
+        provisioning: 'user-created',
+        aliasEditable: true,
+        channelDiscovery: 'adapter-observed',
+        channelKinds: ['direct', 'group'],
+        activities: [],
+        features: {},
+        diagnostics: { receive: true, send: true },
+        configSchema: { schemaVersion: 1, type: 'object', required: [], properties: {} },
+      },
+      {
+        key: 'fixture-gamma',
+        displayName: '示例协作平台',
+        description: '连接示例协作平台账号。',
+        provisioning: 'user-created',
+        aliasEditable: true,
+        channelDiscovery: 'adapter-observed',
+        channelKinds: ['direct', 'group'],
+        activities: [],
+        features: {},
+        diagnostics: { receive: true, send: true },
+        configSchema: {
+          schemaVersion: 1,
+          type: 'object',
+          required: ['workspaceCode', 'secret'],
+          properties: {
+            workspaceCode: { type: 'string', title: '工作区代码' },
+            secret: { type: 'credential-reference', title: '访问密钥' },
+          },
+        },
+      },
+    ],
+  })
+  await page.route('**/api/snapshot', (route) =>
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(snapshot) }),
+  )
   await page.goto('/connections')
 
   await page
@@ -437,18 +483,18 @@ test('adding a connection selects a platform before showing its fields', async (
   await expect(dialog.getByRole('heading', { name: '选择平台' })).toBeVisible()
   await expect(dialog.getByText('选择要连接的平台账号。')).toBeVisible()
   await dialog.getByLabel('平台').click()
-  await expect(page.getByRole('option', { name: 'QQ 官方机器人' })).toBeVisible()
-  await expect(page.getByRole('option', { name: '企业微信智能机器人' })).toBeVisible()
-  await page.getByRole('option', { name: '企业微信智能机器人' }).click()
-  await expect(dialog.getByLabel('App ID')).toHaveCount(0)
+  await expect(page.getByRole('option', { name: '示例群聊平台' })).toBeVisible()
+  await expect(page.getByRole('option', { name: '示例协作平台' })).toBeVisible()
+  await page.getByRole('option', { name: '示例协作平台' }).click()
+  await expect(dialog.getByLabel('工作区代码')).toHaveCount(0)
 
   await dialog.getByRole('button', { name: '填写连接信息' }).click()
-  await expect(dialog.getByRole('heading', { name: '配置 企业微信智能机器人' })).toBeVisible()
+  await expect(dialog.getByRole('heading', { name: '配置 示例协作平台' })).toBeVisible()
   await expect(dialog.getByLabel('连接别名')).toBeVisible()
   await dialog.getByLabel('连接别名').fill('旅程测试连接')
-  await expect(dialog.getByLabel('BotID')).toBeVisible()
-  await expect(dialog.getByLabel('Secret')).toHaveAttribute('type', 'password')
-  await expect(dialog.getByLabel('Secret')).toHaveAttribute('autocomplete', 'off')
+  await expect(dialog.getByLabel('工作区代码')).toBeVisible()
+  await expect(dialog.getByLabel('访问密钥')).toHaveAttribute('type', 'password')
+  await expect(dialog.getByLabel('访问密钥')).toHaveAttribute('autocomplete', 'off')
   await expect(dialog.getByLabel('平台')).toHaveCount(0)
   expect(failures, failures.join('\n')).toEqual([])
 })
@@ -474,7 +520,10 @@ test('a verified Adapter can install, create a schema-backed connection, roll ba
     key: 'synthetic-chat',
     displayName: '合成聊天平台',
     description: '离线产品旅程使用的虚构聊天平台。',
-    userCreatable: true,
+    provisioning: 'user-created',
+    channelKinds: ['direct', 'group'],
+    activities: [],
+    features: {},
     aliasEditable: true,
     channelDiscovery: 'adapter-observed' as const,
     diagnostics: { receive: true, send: true },
@@ -510,7 +559,7 @@ test('a verified Adapter can install, create a schema-backed connection, roll ba
       renderedSlots: [],
       renderedHostSlots: [],
       adapter: {
-        apiVersion: 1 as const,
+        apiVersion: 2 as const,
         key: 'synthetic-chat',
         descriptorDigest: 'a'.repeat(64),
         registered: true,
@@ -704,8 +753,13 @@ test("an intelligent-agent can add another channel while replacing that channel'
   const baseResponse = await request.get('/api/snapshot')
   expect(baseResponse.ok()).toBe(true)
   const baseSnapshot = HostApiContracts.snapshot.response.parse(await baseResponse.json())
-  const webConnection = baseSnapshot.connections.find((connection) => connection.adapterKey === 'web')
-  if (!webConnection) throw new Error('测试快照缺少 Web 连接。')
+  const internalDescriptor = baseSnapshot.connectionAdapters.find(
+    ({ provisioning, channelKinds }) => provisioning === 'system-singleton' && channelKinds.includes('internal'),
+  )
+  const internalConnection = baseSnapshot.connections.find(
+    (connection) => connection.adapterKey === internalDescriptor?.key,
+  )
+  if (!internalConnection) throw new Error('测试快照缺少内置连接。')
   let snapshot: HostSnapshot = {
     ...baseSnapshot,
     models: baseSnapshot.models.some((model) => model.provider === 'deepseek' && model.id === 'deepseek-v4-flash')
@@ -784,9 +838,9 @@ test("an intelligent-agent can add another channel while replacing that channel'
     }
     const channel: HostSnapshot['channels'][number] = {
       id: plan.channelId,
-      connectionId: webConnection.id,
+      connectionId: internalConnection.id,
       platformChannelId: `journey-${created}`,
-      kind: 'web',
+      kind: 'internal',
       displayName: `${plan.displayName} 的内置频道`,
       boundAgentId: plan.agentId,
       runtimePhase: 'idle',
@@ -796,7 +850,7 @@ test("an intelligent-agent can add another channel while replacing that channel'
           agentId: plan.agentId,
           triggerPolicy: 'always',
           processingFeedback: 'auto',
-          eventTriggers: [],
+          activityTriggerOverrides: {},
           boundAt: 1_725_000_000_000 + created * 100,
         },
       ],
@@ -806,14 +860,16 @@ test("an intelligent-agent can add another channel while replacing that channel'
       agents: [...snapshot.agents, agent],
       channels: [...snapshot.channels, channel],
       connections: snapshot.connections.map((connection) =>
-        connection.id === webConnection.id ? { ...connection, channelCount: connection.channelCount + 1 } : connection,
+        connection.id === internalConnection.id
+          ? { ...connection, channelCount: connection.channelCount + 1 }
+          : connection,
       ),
     }
     created += 1
     const response = HostApiContracts.createAgent.response.parse({
       agentId: plan.agentId,
       channelId: plan.channelId,
-      connectionId: webConnection.id,
+      connectionId: internalConnection.id,
     })
     return route.fulfill({ status: 201, contentType: 'application/json', body: JSON.stringify(response) })
   })
@@ -940,12 +996,12 @@ test('connection workbench binds an intelligent-agent without visiting the manag
       },
       channels: [],
     } as const)
-  const connectionId = ConnectionIdSchema.parse('con_journeyqq')
-  const channelId = ChannelIdSchema.parse('chn_journeyqq')
-  const qqChannel = {
+  const connectionId = ConnectionIdSchema.parse('con_journeyexternal')
+  const channelId = ChannelIdSchema.parse('chn_journeyexternal')
+  const externalChannel = {
     id: channelId,
     connectionId,
-    platformChannelId: 'group:journey-qq',
+    platformChannelId: 'opaque-group-journey',
     kind: 'group' as const,
     displayName: '绑定工作台群',
     bindings: [],
@@ -955,15 +1011,18 @@ test('connection workbench binds an intelligent-agent without visiting the manag
     agents: baseSnapshot.agents.some((item) => item.id === agent.id)
       ? baseSnapshot.agents
       : [...baseSnapshot.agents, agent],
-    connectionAdapters: baseSnapshot.connectionAdapters.some((item) => item.key === 'qq-openclaw')
+    connectionAdapters: baseSnapshot.connectionAdapters.some((item) => item.key === 'fixture-beta')
       ? baseSnapshot.connectionAdapters
       : [
           ...baseSnapshot.connectionAdapters,
           {
-            key: 'qq-openclaw',
-            displayName: 'QQ 官方机器人',
-            description: '连接 QQ 机器人账号',
-            userCreatable: true,
+            key: 'fixture-beta',
+            displayName: '示例群聊平台',
+            description: '连接示例群聊平台账号',
+            provisioning: 'user-created',
+            channelKinds: ['direct', 'group'],
+            activities: [],
+            features: {},
             aliasEditable: true,
             channelDiscovery: 'adapter-observed',
             diagnostics: { receive: true, send: true },
@@ -974,18 +1033,21 @@ test('connection workbench binds an intelligent-agent without visiting the manag
       ...baseSnapshot.connections.filter((item) => item.id !== connectionId),
       {
         id: connectionId,
-        adapterKey: 'qq-openclaw',
-        appId: '1000000000',
-        proactiveSend: false,
-        credentialConfigured: true,
+        adapterKey: 'fixture-beta',
+        status: {
+          state: 'connected',
+          proactiveSend: false,
+          credentialConfigured: true,
+          accountReference: '示例账号',
+          activities: {},
+        },
         channelCount: 1,
         knownChannels: [{ id: channelId, name: '绑定工作台群', kind: 'group' }],
-        gateway: { state: 'connected' },
-        receiveTest: { status: 'received', channelId, platformMessageId: 'qq-received' },
-        sendTest: { status: 'sent', channelId, platformMessageId: 'qq-sent' },
+        receiveTest: { status: 'received', channelId, platformMessageId: 'fixture-received' },
+        sendTest: { status: 'sent', channelId, platformMessageId: 'fixture-sent' },
       },
     ],
-    channels: [...baseSnapshot.channels.filter((item) => item.id !== channelId), qqChannel],
+    channels: [...baseSnapshot.channels.filter((item) => item.id !== channelId), externalChannel],
   })
   await page.route('**/api/snapshot', (route) =>
     route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(snapshot) }),
@@ -1009,7 +1071,7 @@ test('connection workbench binds an intelligent-agent without visiting the manag
   })
 
   await page.goto('/connections')
-  await page.getByRole('link', { name: /QQ 官方机器人/u }).click()
+  await page.getByRole('link', { name: /示例群聊平台/u }).click()
   await page.getByRole('button', { name: '绑定智能体' }).click()
   const dialog = page.getByRole('dialog')
   await expect(dialog.getByRole('heading', { name: '绑定智能体' })).toBeVisible()
@@ -1017,7 +1079,7 @@ test('connection workbench binds an intelligent-agent without visiting the manag
   await dialog.getByRole('button', { name: '绑定频道' }).click()
   await expect(page.getByText('频道已绑定。')).toBeVisible()
   await expect(page).toHaveURL(/\/connections(?:\/|$)/u)
-  await expect(page.getByRole('heading', { name: 'QQ 官方机器人' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: '示例群聊平台' })).toBeVisible()
   expect(failures, failures.join('\n')).toEqual([])
 })
 
@@ -1029,11 +1091,11 @@ test('external channel exposes processing feedback and per-event trigger control
   const sourceAgent =
     baseSnapshot.agents[0] ??
     ({
-      id: AgentIdSchema.parse('agt_onebotsettings'),
+      id: AgentIdSchema.parse('agt_activitysettings'),
       displayName: '频道设置智能体',
       persona: '',
       personaDocument: { version: 1, segments: [] },
-      currentRevisionId: AgentRevisionIdSchema.parse('arev_onebotsettings'),
+      currentRevisionId: AgentRevisionIdSchema.parse('arev_activitysettings'),
       createdAt: 1_725_000_000_000,
       runtimeStatus: 'idle',
       runtimePhase: 'idle',
@@ -1064,27 +1126,62 @@ test('external channel exposes processing feedback and per-event trigger control
       },
       channels: [],
     } as const)
-  const connectionId = ConnectionIdSchema.parse('con_onebotsettings')
-  const channelId = ChannelIdSchema.parse('chn_onebotsettings')
+  const connectionId = ConnectionIdSchema.parse('con_activitysettings')
+  const channelId = ChannelIdSchema.parse('chn_activitysettings')
   let binding = HostApiContracts.createBinding.response.parse({
     channelId,
     agentId: sourceAgent.id,
     triggerPolicy: 'always',
     processingFeedback: 'auto',
-    eventTriggers: [],
+    activityTriggerOverrides: {},
     boundAt: 1_725_000_000_000,
   })
   let snapshot: HostSnapshot = HostApiContracts.snapshot.response.parse({
     ...baseSnapshot,
-    connectionAdapters: baseSnapshot.connectionAdapters.some(({ key }) => key === 'onebot-11')
+    connectionAdapters: baseSnapshot.connectionAdapters.some(({ key }) => key === 'fixture-beta')
       ? baseSnapshot.connectionAdapters
       : [
           ...baseSnapshot.connectionAdapters,
           {
-            key: 'onebot-11',
-            displayName: 'OneBot 11',
-            description: '连接独立部署的 OneBot 11 协议端',
-            userCreatable: true,
+            key: 'fixture-beta',
+            displayName: '示例群聊平台',
+            description: '连接示例群聊平台账号',
+            provisioning: 'user-created',
+            channelKinds: ['direct', 'group'],
+            activities: [
+              {
+                key: 'member-poked',
+                scope: 'channel',
+                displayName: '轻触成员',
+                description: '频道成员之间发生轻触互动。',
+                triggerable: true,
+                channelKinds: ['group'],
+              },
+              {
+                key: 'message-feedback-negative',
+                scope: 'channel',
+                displayName: '负向反馈',
+                description: '频道消息收到负向反馈。',
+                triggerable: true,
+                channelKinds: ['group'],
+              },
+              {
+                key: 'account-profile-updated',
+                scope: 'connection',
+                displayName: '账号资料更新',
+                description: '连接账号的资料发生变化。',
+                triggerable: false,
+              },
+              {
+                key: 'direct-only-activity',
+                scope: 'channel',
+                displayName: '私聊专属活动',
+                description: '只适用于私聊频道。',
+                triggerable: true,
+                channelKinds: ['direct'],
+              },
+            ],
+            features: { processingFeedback: { channelKinds: ['group'] } },
             aliasEditable: true,
             channelDiscovery: 'adapter-observed',
             diagnostics: { receive: true, send: true },
@@ -1101,15 +1198,22 @@ test('external channel exposes processing feedback and per-event trigger control
       ...baseSnapshot.connections.filter(({ id }) => id !== connectionId),
       {
         id: connectionId,
-        adapterKey: 'onebot-11',
+        adapterKey: 'fixture-beta',
         alias: '测试协议端',
+        activityTriggerDefaults: ['member-poked'],
         status: {
           state: 'connected',
           credentialConfigured: true,
           proactiveSend: true,
-          accountId: 'fixture-account',
+          accountReference: 'fixture-account',
           implementation: { name: 'Fixture', version: '1.0.0', protocolVersion: 'v11' },
-          optionalCapabilities: { set_msg_emoji_like: 'available', send_poke: 'unknown' },
+          activities: {
+            'member-poked': { state: 'available' },
+            'message-feedback-negative': { state: 'available' },
+            'account-profile-updated': { state: 'available' },
+            'direct-only-activity': { state: 'available' },
+          },
+          processingFeedback: { state: 'available' },
         },
         channelCount: 1,
         knownChannels: [{ id: channelId, name: '外部群聊', kind: 'group' }],
@@ -1130,6 +1234,8 @@ test('external channel exposes processing feedback and per-event trigger control
     ],
   })
   const bindingRequests: unknown[] = []
+  const defaultRequests: unknown[] = []
+  const deleteRequests: unknown[] = []
   await page.route('**/api/snapshot', (route) =>
     route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(snapshot) }),
   )
@@ -1159,6 +1265,81 @@ test('external channel exposes processing feedback and per-event trigger control
     })
     return route.fulfill({ status: 201, contentType: 'application/json', body: JSON.stringify(binding) })
   })
+  await page.route(`**/api/connections/${connectionId}/activity-trigger-defaults`, async (route) => {
+    const input = HostApiContracts.updateConnectionActivityTriggerDefaults.request.parse(route.request().postDataJSON())
+    defaultRequests.push(input)
+    snapshot = HostApiContracts.snapshot.response.parse({
+      ...snapshot,
+      connections: snapshot.connections.map((connection) =>
+        connection.id === connectionId ? { ...connection, activityTriggerDefaults: input.activityKeys } : connection,
+      ),
+    })
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ connectionId, activityKeys: input.activityKeys }),
+    })
+  })
+  await page.route(`**/api/connections/${connectionId}`, async (route) => {
+    if (route.request().method() !== 'DELETE') return route.continue()
+    const input = HostApiContracts.deleteConnection.request.parse(route.request().postDataJSON())
+    deleteRequests.push(input)
+    const removedConnection = snapshot.connections.find(({ id }) => id === connectionId)!
+    snapshot = HostApiContracts.snapshot.response.parse({
+      ...snapshot,
+      connections: snapshot.connections.filter(({ id }) => id !== connectionId),
+      channels: snapshot.channels.filter(({ connectionId: ownerId }) => ownerId !== connectionId),
+      archivedConnections: [
+        ...snapshot.archivedConnections,
+        {
+          id: connectionId,
+          adapterKey: removedConnection.adapterKey,
+          alias: removedConnection.alias,
+          channelCount: 1,
+          archivedAt: Date.now(),
+        },
+      ],
+    })
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ connectionId, archived: true }),
+    })
+  })
+  await page.route(`**/api/connections/${connectionId}/restore`, async (route) => {
+    snapshot = HostApiContracts.snapshot.response.parse({
+      ...snapshot,
+      connections: [
+        ...snapshot.connections,
+        {
+          id: connectionId,
+          adapterKey: 'fixture-beta',
+          alias: '测试协议端',
+          activityTriggerDefaults: [],
+          status: {
+            state: 'connected',
+            credentialConfigured: true,
+            proactiveSend: true,
+            activities: {
+              'member-poked': { state: 'available' },
+              'message-feedback-negative': { state: 'available' },
+              'account-profile-updated': { state: 'available' },
+              'direct-only-activity': { state: 'available' },
+            },
+            processingFeedback: { state: 'available' },
+          },
+          channelCount: 1,
+          knownChannels: [{ id: channelId, name: '外部群聊', kind: 'group' }],
+        },
+      ],
+      archivedConnections: snapshot.archivedConnections.filter(({ id }) => id !== connectionId),
+    })
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ connectionId, restored: true }),
+    })
+  })
 
   await page.goto(`/work/channels/${channelId}`)
   const inspector = page.getByLabel('频道')
@@ -1167,24 +1348,54 @@ test('external channel exposes processing feedback and per-event trigger control
   await feedback.click()
   await expect(page.getByText('频道事件设置已更新。')).toBeVisible()
   await inspector.getByRole('button', { name: '设置特殊事件' }).click()
-  for (const label of ['进入会话', '卡片操作', '正向反馈', '负向反馈', '撤销反馈']) {
-    await expect(inspector.getByRole('switch', { name: label })).toBeVisible()
+  for (const label of ['轻触成员', '负向反馈']) {
+    await expect(inspector.getByRole('combobox', { name: label })).toBeVisible()
   }
-  const poke = inspector.getByRole('switch', { name: '戳一戳' })
-  await expect(poke).not.toBeChecked()
+  await expect(inspector.getByRole('combobox', { name: '账号资料更新' })).toHaveCount(0)
+  await expect(inspector.getByRole('combobox', { name: '私聊专属活动' })).toHaveCount(0)
+  const poke = inspector.getByRole('combobox', { name: '轻触成员' })
+  await expect(poke).toHaveText('跟随连接（当前开启）')
   await poke.click()
-  await expect(poke).toBeChecked()
-  const negativeFeedback = inspector.getByRole('switch', { name: '负向反馈' })
+  await page.getByRole('option', { name: '此频道关闭' }).click()
+  await expect(poke).toHaveText('此频道关闭')
+  const negativeFeedback = inspector.getByRole('combobox', { name: '负向反馈' })
+  await expect(negativeFeedback).toHaveText('跟随连接（当前关闭）')
   await negativeFeedback.click()
-  await expect(negativeFeedback).toBeChecked()
+  await page.getByRole('option', { name: '此频道开启' }).click()
+  await expect(negativeFeedback).toHaveText('此频道开启')
+  await poke.click()
+  await page.getByRole('option', { name: '跟随连接（当前开启）' }).click()
+  await expect(poke).toHaveText('跟随连接（当前开启）')
   expect(bindingRequests).toEqual([
-    expect.objectContaining({ processingFeedback: 'off', eventTriggers: [] }),
-    expect.objectContaining({ processingFeedback: 'off', eventTriggers: ['member-poked'] }),
+    expect.objectContaining({ processingFeedback: 'off', activityTriggerOverrides: {} }),
+    expect.objectContaining({ processingFeedback: 'off', activityTriggerOverrides: { 'member-poked': false } }),
     expect.objectContaining({
       processingFeedback: 'off',
-      eventTriggers: ['member-poked', 'message-feedback-negative'],
+      activityTriggerOverrides: { 'member-poked': false, 'message-feedback-negative': true },
+    }),
+    expect.objectContaining({
+      processingFeedback: 'off',
+      activityTriggerOverrides: { 'message-feedback-negative': true },
     }),
   ])
+
+  await page.goto(`/connections/${connectionId}`)
+  const connectionDefault = page.getByRole('switch', { name: '轻触成员' })
+  await expect(connectionDefault).toBeChecked()
+  await connectionDefault.click()
+  await expect(connectionDefault).not.toBeChecked()
+  expect(defaultRequests).toEqual([{ activityKeys: [] }])
+
+  await page.getByRole('button', { name: '删除连接' }).click()
+  const deleteDialog = page.getByRole('alertdialog', { name: '删除连接' })
+  await expect(deleteDialog.getByRole('switch', { name: '同时删除频道数据' })).not.toBeChecked()
+  await deleteDialog.getByRole('button', { name: '移除连接并保留频道数据' }).click()
+  expect(deleteRequests).toEqual([{ deleteChannelData: false }])
+
+  await page.goto('/connections?create=1')
+  await expect(page.getByRole('dialog').getByText('测试协议端')).toBeVisible()
+  await page.getByRole('dialog').getByRole('button', { name: '恢复' }).click()
+  await expect(page.getByText('连接及频道数据已恢复。')).toBeVisible()
   expect(failures, failures.join('\n')).toEqual([])
 })
 
@@ -1196,8 +1407,11 @@ test('channel context controls and intelligent-agent deletion are guarded and re
   const baseResponse = await request.get('/api/snapshot')
   expect(baseResponse.ok()).toBe(true)
   const baseSnapshot = HostApiContracts.snapshot.response.parse(await baseResponse.json())
-  const connection = baseSnapshot.connections.find((item) => item.adapterKey === 'web')
-  if (!connection) throw new Error('测试快照缺少 Web 连接。')
+  const internalDescriptor = baseSnapshot.connectionAdapters.find(
+    ({ provisioning, channelKinds }) => provisioning === 'system-singleton' && channelKinds.includes('internal'),
+  )
+  const connection = baseSnapshot.connections.find((item) => item.adapterKey === internalDescriptor?.key)
+  if (!connection) throw new Error('测试快照缺少内置连接。')
   const agentId = AgentIdSchema.parse('agt_contextjourney')
   const revisionId = AgentRevisionIdSchema.parse('arev_contextjourney')
   const channelId = ChannelIdSchema.parse('chn_contextjourney')
@@ -1251,7 +1465,7 @@ test('channel context controls and intelligent-agent deletion are guarded and re
         id: channelId,
         connectionId: connection.id,
         platformChannelId: 'journey-context',
-        kind: 'web',
+        kind: 'internal',
         displayName: '上下文旅程频道',
         boundAgentId: agentId,
         runtimePhase: 'using-tool',

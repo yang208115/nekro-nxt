@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX `platform_identities_id_connection_uq` ON `platform_identities` (`id`,`connection_id`);

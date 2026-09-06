@@ -2,7 +2,7 @@ export * from './definition.js'
 export * from './runtime.js'
 export * from './transport.js'
 
-import type { AdapterHostContributionV1 } from '@nekro-nxt/adapter-sdk'
+import type { AdapterHostContributionV2 } from '@nekro-nxt/adapter-sdk'
 import {
   ONEBOT_11_CONNECTION_DEFINITION,
   OneBot11ConnectionConfigurationSchema,
@@ -12,8 +12,8 @@ import { OneBot11Runtime, type OneBot11RuntimeOptions } from './runtime.js'
 
 export const createOneBot11HostContribution = (
   transport?: OneBot11RuntimeOptions['transport'],
-): AdapterHostContributionV1 => ({
-  apiVersion: 1,
+): AdapterHostContributionV2 => ({
+  apiVersion: 2,
   descriptor: ONEBOT_11_CONNECTION_DEFINITION.descriptor,
   create: (context, stored) =>
     Promise.resolve(

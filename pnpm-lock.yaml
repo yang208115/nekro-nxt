@@ -265,21 +265,12 @@ importers:
       '@deepseek-ai/dsh-web-search-deepseek':
         specifier: 0.1.1-rc.2
         version: 0.1.1-rc.2(8e47c89c848a591c17689609bee09251)
-      '@nekro-nxt/adapter-onebot-11':
+      '@nekro-nxt/adapter-builtin-roster':
         specifier: workspace:*
-        version: link:../../packages/adapter-onebot-11
-      '@nekro-nxt/adapter-qq-openclaw':
-        specifier: workspace:*
-        version: link:../../packages/adapter-qq-openclaw
+        version: link:../../packages/adapter-builtin-roster
       '@nekro-nxt/adapter-sdk':
         specifier: workspace:*
         version: link:../../packages/adapter-sdk
-      '@nekro-nxt/adapter-web':
-        specifier: workspace:*
-        version: link:../../packages/adapter-web
-      '@nekro-nxt/adapter-wecom-ai-bot':
-        specifier: workspace:*
-        version: link:../../packages/adapter-wecom-ai-bot
       '@nekro-nxt/channel-runtime':
         specifier: workspace:*
         version: link:../../packages/channel-runtime
@@ -472,6 +463,28 @@ importers:
         specifier: 6.4.3
         version: 6.4.3(@types/node@24.13.3)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0)
 
+  packages/adapter-builtin-roster:
+    dependencies:
+      '@nekro-nxt/adapter-onebot-11':
+        specifier: workspace:*
+        version: link:../adapter-onebot-11
+      '@nekro-nxt/adapter-qq-openclaw':
+        specifier: workspace:*
+        version: link:../adapter-qq-openclaw
+      '@nekro-nxt/adapter-sdk':
+        specifier: workspace:*
+        version: link:../adapter-sdk
+      '@nekro-nxt/adapter-web':
+        specifier: workspace:*
+        version: link:../adapter-web
+      '@nekro-nxt/adapter-wecom-ai-bot':
+        specifier: workspace:*
+        version: link:../adapter-wecom-ai-bot
+    devDependencies:
+      vitest:
+        specifier: ^4.1.8
+        version: 4.1.8(@opentelemetry/api@1.9.1)(@types/node@24.13.3)(@vitest/coverage-v8@4.1.8)(vite@6.4.3(@types/node@24.13.3)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))
+
   packages/adapter-onebot-11:
     dependencies:
       '@nekro-nxt/adapter-sdk':
@@ -509,6 +522,9 @@ importers:
         specifier: 4.4.3
         version: 4.4.3
     devDependencies:
+      '@nekro-nxt/test-harness':
+        specifier: workspace:*
+        version: link:../test-harness
       '@types/ws':
         specifier: 8.18.1
         version: 8.18.1
@@ -15207,6 +15223,35 @@ snapshots:
     optionalDependencies:
       '@opentelemetry/api': 1.9.1
       '@types/node': 22.20.0
+      '@vitest/coverage-v8': 4.1.8(vitest@4.1.8)
+    transitivePeerDependencies:
+      - msw
+
+  vitest@4.1.8(@opentelemetry/api@1.9.1)(@types/node@24.13.3)(@vitest/coverage-v8@4.1.8)(vite@6.4.3(@types/node@24.13.3)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0)):
+    dependencies:
+      '@vitest/expect': 4.1.8
+      '@vitest/mocker': 4.1.8(vite@6.4.3(@types/node@24.13.3)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))
+      '@vitest/pretty-format': 4.1.8
+      '@vitest/runner': 4.1.8
+      '@vitest/snapshot': 4.1.8
+      '@vitest/spy': 4.1.8
+      '@vitest/utils': 4.1.8
+      es-module-lexer: 2.3.2
+      expect-type: 1.4.0
+      magic-string: 0.30.21
+      obug: 2.1.4
+      pathe: 2.0.3
+      picomatch: 4.0.5
+      std-env: 4.2.0
+      tinybench: 2.9.0
+      tinyexec: 1.3.0
+      tinyglobby: 0.2.17
+      tinyrainbow: 3.1.1
+      vite: 6.4.3(@types/node@24.13.3)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0)
+      why-is-node-running: 2.3.0
+    optionalDependencies:
+      '@opentelemetry/api': 1.9.1
+      '@types/node': 24.13.3
       '@vitest/coverage-v8': 4.1.8(vitest@4.1.8)
     transitivePeerDependencies:
       - msw

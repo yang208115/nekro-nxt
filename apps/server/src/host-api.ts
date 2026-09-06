@@ -1,7 +1,7 @@
 import type { WebServer, WebRoute } from '@deepseek-ai/dsh-host-webserver'
 import { strFromU8, strToU8, unzipSync, zipSync } from 'fflate'
 import { isAdminConsoleOutbound, type ChannelFact, type ChannelHistoryEntry } from '@nekro-nxt/channel-runtime'
-import type { AgentRevisionContent, ImageUnderstandingPolicy } from '@nekro-nxt/core'
+import type { AgentRevisionContent, ConnectionEventRecord, ImageUnderstandingPolicy } from '@nekro-nxt/core'
 import {
   AgentIdSchema,
   AuthoringAttemptIdSchema,
@@ -28,6 +28,7 @@ import {
   type AgentId,
   type ChannelId,
   type HostApiContract,
+  type HostConnectionEvent,
   type HostUiPermission,
   type HostSnapshotMessage,
   type ChannelRuntimeProjection,
@@ -590,7 +591,7 @@ export const projectHistoryEntry = (runtime: NekroRuntime, entry: ChannelHistory
     return {
       id: entry.sourceId,
       channelId: entry.channelId,
-      role: entry.activityType === undefined ? 'member' : 'system',
+      role: entry.activityKey === undefined ? 'member' : 'system',
       parts,
       ...(entry.senderMemberId === undefined
         ? {}
@@ -601,7 +602,7 @@ export const projectHistoryEntry = (runtime: NekroRuntime, entry: ChannelHistory
             },
           }),
       ...(entry.facts?.['mentionedBot'] === true ? { mentionedConnectionAccount: true } : {}),
-      ...(entry.activityType === undefined ? {} : { activityType: entry.activityType }),
+      ...(entry.activityKey === undefined ? {} : { activityKey: entry.activityKey }),
       ...(entry.targetLogicalMessageId === undefined ? {} : { targetLogicalMessageId: entry.targetLogicalMessageId }),
       occurredAt: entry.occurredAt,
     }
@@ -630,7 +631,7 @@ export const projectChannelFact = (runtime: NekroRuntime, fact: ChannelFact): Ho
       channelId: event.channelId,
       occurredAt: event.receivedAt,
       ...(event.senderMemberId === undefined ? {} : { senderMemberId: event.senderMemberId }),
-      ...(event.activityType === undefined ? {} : { activityType: event.activityType }),
+      ...(event.activityKey === undefined ? {} : { activityKey: event.activityKey }),
       ...(event.targetLogicalMessageId === undefined ? {} : { targetLogicalMessageId: event.targetLogicalMessageId }),
       parts: event.parts,
       ...(event.facts === undefined ? {} : { facts: event.facts }),
@@ -652,6 +653,36 @@ export const projectChannelFact = (runtime: NekroRuntime, fact: ChannelFact): Ho
     })
   } catch {
     return undefined
+  }
+}
+
+const projectConnectionEvent = (runtime: NekroRuntime, event: ConnectionEventRecord): HostConnectionEvent => {
+  const actor =
+    event.actorIdentityId === undefined ? undefined : runtime.repository.getPlatformIdentity(event.actorIdentityId)
+  const subject =
+    event.subjectIdentityId === undefined ? undefined : runtime.repository.getPlatformIdentity(event.subjectIdentityId)
+  return {
+    id: event.id,
+    connectionId: event.connectionId,
+    activityKey: event.activityKey,
+    summary: event.summary,
+    ...(actor === undefined
+      ? {}
+      : {
+          actor: {
+            identityId: actor.id,
+            ...(actor.displayName === undefined ? {} : { displayName: actor.displayName }),
+          },
+        }),
+    ...(subject === undefined
+      ? {}
+      : {
+          subject: {
+            identityId: subject.id,
+            ...(subject.displayName === undefined ? {} : { displayName: subject.displayName }),
+          },
+        }),
+    occurredAt: event.sourceTimestamp,
   }
 }
 
@@ -1387,7 +1418,7 @@ export const createNekroHostApi = (
           agentId: binding.agentId,
           triggerPolicy: binding.triggerPolicy,
           processingFeedback: binding.processingFeedback,
-          eventTriggers: binding.eventTriggers,
+          activityTriggerOverrides: binding.activityTriggerOverrides,
           boundAt: binding.boundAt,
         })),
       }
@@ -1397,28 +1428,27 @@ export const createNekroHostApi = (
     // every Channel's history.
     const messages: HostSnapshotMessage[] = []
     const connections = runtime.core.listConnections().map((connection) => {
-      const diagnostic = runtime.connectionDiagnostic(connection.id)
       const adapterDiagnostic = runtime.adapterConnectionDiagnostic(connection.id)
       const lastInbound = runtime.lastInbound(connection.id)
       const tests = runtime.connectionTests(connection.id)
-      const gateway =
-        diagnostic?.gateway ??
-        (adapterDiagnostic === undefined
-          ? undefined
-          : {
-              state: adapterDiagnostic.status,
-              ...(adapterDiagnostic.message === undefined ? {} : { lastError: adapterDiagnostic.message }),
-            })
+      const capabilities = runtime.connectionCapabilities(connection.id)
       return {
         id: connection.id,
         adapterKey: connection.adapterKey,
         ...(connection.alias === undefined ? {} : { alias: connection.alias }),
+        activityTriggerDefaults: connection.activityTriggerDefaults,
         status: {
-          state: gateway?.state ?? 'stopped',
-          credentialConfigured: adapterDiagnostic?.credentialConfigured ?? diagnostic?.credentialConfigured ?? false,
+          state: adapterDiagnostic?.status ?? 'stopped',
+          credentialConfigured: adapterDiagnostic?.credentialConfigured ?? false,
           proactiveSend: adapterDiagnostic?.proactiveSend ?? false,
+          activities: capabilities?.activities ?? {},
+          ...(capabilities?.processingFeedback === undefined
+            ? {}
+            : { processingFeedback: capabilities.processingFeedback }),
           ...(adapterDiagnostic?.message === undefined ? {} : { message: adapterDiagnostic.message }),
-          ...(adapterDiagnostic?.accountId === undefined ? {} : { accountId: adapterDiagnostic.accountId }),
+          ...(adapterDiagnostic?.accountReference === undefined
+            ? {}
+            : { accountReference: adapterDiagnostic.accountReference }),
           ...(adapterDiagnostic?.implementation === undefined
             ? {}
             : { implementation: adapterDiagnostic.implementation }),
@@ -1429,7 +1459,9 @@ export const createNekroHostApi = (
         channelCount: runtime.core.listChannelsByConnection(connection.id).length,
         knownChannels: runtime.core.listChannelsByConnection(connection.id).map((channel) => ({
           id: channel.id,
-          name: channel.displayName ?? channel.platformChannelId,
+          name:
+            channel.displayName ??
+            (channel.kind === 'group' ? '未命名群聊' : channel.kind === 'direct' ? '未命名私聊' : '未命名内置频道'),
           kind: channel.kind,
         })),
         ...(lastInbound?.platformMessageId === undefined
@@ -1439,6 +1471,13 @@ export const createNekroHostApi = (
         ...(tests?.send === undefined ? {} : { sendTest: tests.send }),
       }
     })
+    const archivedConnections = runtime.core.listArchivedConnections().map((connection) => ({
+      id: connection.id,
+      adapterKey: connection.adapterKey,
+      ...(connection.alias === undefined ? {} : { alias: connection.alias }),
+      channelCount: runtime.repository.listChannelIdsByConnection(connection.id).length,
+      archivedAt: connection.archivedAt,
+    }))
     const webSearch = await runtime.host.getWebSearchCapabilityStatus()
     return HostApiContracts.snapshot.parseResponse({
       productMetadata,
@@ -1453,6 +1492,7 @@ export const createNekroHostApi = (
       channels: channelProjection,
       messages,
       connections,
+      archivedConnections,
       extensions: projectExtensions(runtime),
       hostUi: {
         preferencesRevision: runtime.repository.getHostUiPreferencesRevision(),
@@ -1951,7 +1991,7 @@ export const createNekroHostApi = (
                   unrestrictedFileAccess: false,
                 } as const)
               await assertAuxiliaryImageModel(runtime, parsed.imagePolicy)
-              const entity = await runtime.createAgentWithWebChannel({
+              const entity = await runtime.createAgentWithInternalChannel({
                 displayName: parsed.displayName,
                 persona: parsed.persona,
                 ...(parsed.personaDocument === undefined ? {} : { personaDocument: parsed.personaDocument }),
@@ -2033,7 +2073,7 @@ export const createNekroHostApi = (
                 .strict()
                 .parse(input.input)
               const descriptor = runtime.adapters.get(request.adapterKey)?.descriptor
-              if (!descriptor?.userCreatable) throw new Error('这个 Adapter 不能创建用户连接。')
+              if (descriptor?.provisioning !== 'user-created') throw new Error('这个 Adapter 不能创建用户连接。')
               for (const key of Object.keys(request.values)) {
                 if (descriptor.configSchema.properties[key]?.type !== 'credential-reference') {
                   throw new Error(`连接凭据包含未知字段：${key}`)
@@ -2109,11 +2149,11 @@ export const createNekroHostApi = (
                 })),
               )
             } else if (input.method === 'channels.create') {
-              const parsed = HostApiContracts.createWebChannel.parseRequest(input.input)
+              const parsed = HostApiContracts.createInternalChannel.parseRequest(input.input)
               const channel = runtime.core.createChannel({
-                connectionId: runtime.webConnectionId,
+                connectionId: runtime.internalConnectionId,
                 platformChannelId: `host-ui-${randomUUID()}`,
-                kind: 'web',
+                kind: 'internal',
                 displayName: parsed.displayName,
               })
               value = { channelId: channel.id, connectionId: channel.connectionId }
@@ -2132,7 +2172,9 @@ export const createNekroHostApi = (
                 agentId: parsed.agentId,
                 triggerPolicy: parsed.triggerPolicy,
                 ...(parsed.processingFeedback === undefined ? {} : { processingFeedback: parsed.processingFeedback }),
-                ...(parsed.eventTriggers === undefined ? {} : { eventTriggers: parsed.eventTriggers }),
+                ...(parsed.activityTriggerOverrides === undefined
+                  ? {}
+                  : { activityTriggerOverrides: parsed.activityTriggerOverrides }),
               })
             } else if (input.method === 'channels.unbind') {
               const request = z.object({ channelId: ChannelIdSchema }).strict().parse(input.input)
@@ -2165,8 +2207,8 @@ export const createNekroHostApi = (
               const message = HostApiContracts.sendChannelMessage.parseRequest(request.message)
               const channel = runtime.repository.getChannel(request.channelId)
               if (!channel) throw new Error('频道不存在。')
-              if (channel.kind === 'web') {
-                value = await runtime.web.postMessage({
+              if (channel.kind === 'internal') {
+                value = await runtime.internalChannel.postMessage({
                   channelId: request.channelId,
                   clientEventId: message.clientEventId ?? `host-ui-${Date.now()}`,
                   parts: message.parts,
@@ -2175,7 +2217,7 @@ export const createNekroHostApi = (
               } else {
                 if (!runtime.repository.getBinding(request.channelId)) throw new Error('频道尚未绑定智能体。')
                 const connection = runtime.repository.getConnection(channel.connectionId)
-                if (!connection || runtime.connectionCapabilities(connection.id)?.proactiveSend !== true) {
+                if (!connection || runtime.connectionCapabilities(connection.id)?.outbound.proactiveSend !== true) {
                   throw new Error('这个连接不允许主动发言。')
                 }
                 await runtime.channels.sendAdminConsoleMessage({
@@ -2682,7 +2724,9 @@ export const createNekroHostApi = (
             channelId,
             triggerPolicy: parsed.triggerPolicy,
             ...(parsed.processingFeedback === undefined ? {} : { processingFeedback: parsed.processingFeedback }),
-            ...(parsed.eventTriggers === undefined ? {} : { eventTriggers: parsed.eventTriggers }),
+            ...(parsed.activityTriggerOverrides === undefined
+              ? {}
+              : { activityTriggerOverrides: parsed.activityTriggerOverrides }),
           })
           emit('write-binding', 'done', kind === 'replace' ? '已改由新智能体响应。' : '频道已绑定。')
           writeJson(res, 201, HostApiContracts.createBinding.parseResponse(binding))
@@ -3467,7 +3511,7 @@ export const createNekroHostApi = (
           ? {}
           : { dynamicClientApprovalPolicy: parsed.dynamicClientApprovalPolicy }),
       }
-      const entity = await runtime.createAgentWithWebChannel(content)
+      const entity = await runtime.createAgentWithInternalChannel(content)
       writeJson(
         res,
         201,
@@ -3640,17 +3684,17 @@ export const createNekroHostApi = (
           return
         }
         try {
-          const parsed = HostApiContracts.createWebChannel.parseRequest(await readJsonBody(req))
+          const parsed = HostApiContracts.createInternalChannel.parseRequest(await readJsonBody(req))
           const channel = runtime.core.createChannel({
-            connectionId: runtime.webConnectionId,
-            platformChannelId: `web-channel-${crypto.randomUUID()}`,
-            kind: 'web',
+            connectionId: runtime.internalConnectionId,
+            platformChannelId: `internal-channel-${crypto.randomUUID()}`,
+            kind: 'internal',
             displayName: parsed.displayName,
           })
           writeJson(
             res,
             201,
-            HostApiContracts.createWebChannel.parseResponse({
+            HostApiContracts.createInternalChannel.parseResponse({
               channelId: channel.id,
               connectionId: channel.connectionId,
             }),
@@ -3869,8 +3913,8 @@ export const createNekroHostApi = (
           writeError(res, 404, 'not-found', '频道不存在。')
           return
         }
-        if (channel.kind === 'web') {
-          const result = await runtime.web.postMessage({
+        if (channel.kind === 'internal') {
+          const result = await runtime.internalChannel.postMessage({
             channelId: typedChannelId,
             clientEventId: parsed.clientEventId ?? `http-${Date.now()}`,
             parts: parsed.parts,
@@ -3892,7 +3936,7 @@ export const createNekroHostApi = (
           return
         }
         const connection = runtime.repository.getConnection(channel.connectionId)
-        if (!connection || runtime.connectionCapabilities(connection.id)?.proactiveSend !== true) {
+        if (!connection || runtime.connectionCapabilities(connection.id)?.outbound.proactiveSend !== true) {
           writeError(res, 400, 'proactive-send-disabled', '这个平台连接不允许主动发言。请在连接配置中打开主动发送。')
           return
         }
@@ -3953,6 +3997,41 @@ export const createNekroHostApi = (
     path: '/api/connections',
     handler: async (req, res) => {
       const url = new URL(req.url ?? '/', 'http://localhost')
+      const eventsMatch = /^\/api\/connections\/([^/]+)\/events$/.exec(url.pathname)
+      if (eventsMatch) {
+        if (req.method !== 'GET') {
+          writeError(res, 405, 'method-not-allowed', '连接活动只支持 GET。')
+          return
+        }
+        try {
+          const connectionId = ConnectionIdSchema.parse(decodeURIComponent(eventsMatch[1] ?? ''))
+          const beforeReceivedAt = url.searchParams.get('beforeReceivedAt')
+          const beforeId = url.searchParams.get('beforeId')
+          const limit = url.searchParams.get('limit')
+          const params = HostApiContracts.listConnectionEvents.parseParams({
+            connectionId,
+            ...(beforeReceivedAt === null ? {} : { beforeReceivedAt: Number(beforeReceivedAt) }),
+            ...(beforeId === null ? {} : { beforeId }),
+            ...(limit === null ? {} : { limit: Number(limit) }),
+          })
+          if ((params.beforeReceivedAt === undefined) !== (params.beforeId === undefined)) {
+            throw new Error('连接活动游标必须同时包含时间和 ID。')
+          }
+          const records = runtime.core.listConnectionEvents(params.connectionId, {
+            limit: params.limit + 1,
+            ...(params.beforeReceivedAt === undefined || params.beforeId === undefined
+              ? {}
+              : { before: { receivedAt: params.beforeReceivedAt, id: params.beforeId } }),
+          })
+          writeContractJson(res, 200, HostApiContracts.listConnectionEvents, {
+            events: records.slice(0, params.limit).map((event) => projectConnectionEvent(runtime, event)),
+            hasMore: records.length > params.limit,
+          })
+        } catch (error) {
+          writeError(res, 400, 'connection-events-failed', error instanceof Error ? error.message : String(error))
+        }
+        return
+      }
       const aliasMatch = /^\/api\/connections\/([^/]+)\/alias$/.exec(url.pathname)
       if (aliasMatch) {
         if (req.method !== 'POST') {
@@ -3981,6 +4060,71 @@ export const createNekroHostApi = (
           })
         } catch (error) {
           writeError(res, 400, 'connection-alias-failed', error instanceof Error ? error.message : String(error))
+        }
+        return
+      }
+      const defaultsMatch = /^\/api\/connections\/([^/]+)\/activity-trigger-defaults$/.exec(url.pathname)
+      if (defaultsMatch) {
+        if (req.method !== 'POST') {
+          writeError(res, 405, 'method-not-allowed', '只支持 POST。')
+          return
+        }
+        try {
+          const connectionId = ConnectionIdSchema.parse(decodeURIComponent(defaultsMatch[1] ?? ''))
+          const params = HostApiContracts.updateConnectionActivityTriggerDefaults.parseParams({ connectionId })
+          const body = HostApiContracts.updateConnectionActivityTriggerDefaults.parseRequest(await readJsonBody(req))
+          const updated = runtime.updateConnectionActivityTriggerDefaults(params.connectionId, body.activityKeys)
+          writeContractJson(res, 200, HostApiContracts.updateConnectionActivityTriggerDefaults, {
+            connectionId: updated.id,
+            activityKeys: updated.activityTriggerDefaults,
+          })
+        } catch (error) {
+          writeError(
+            res,
+            400,
+            'connection-activity-defaults-failed',
+            error instanceof Error ? error.message : String(error),
+          )
+        }
+        return
+      }
+      const restoreMatch = /^\/api\/connections\/([^/]+)\/restore$/.exec(url.pathname)
+      if (restoreMatch) {
+        if (req.method !== 'POST') {
+          writeError(res, 405, 'method-not-allowed', '只支持 POST。')
+          return
+        }
+        try {
+          const connectionId = ConnectionIdSchema.parse(decodeURIComponent(restoreMatch[1] ?? ''))
+          const params = HostApiContracts.restoreConnection.parseParams({ connectionId })
+          HostApiContracts.restoreConnection.parseRequest(undefined)
+          const restored = await runtime.restoreConnection(params.connectionId)
+          writeContractJson(res, 200, HostApiContracts.restoreConnection, {
+            connectionId: restored.id,
+            restored: true,
+          })
+        } catch (error) {
+          writeError(res, 400, 'connection-restore-failed', error instanceof Error ? error.message : String(error))
+        }
+        return
+      }
+      const deleteMatch = /^\/api\/connections\/([^/]+)$/.exec(url.pathname)
+      if (deleteMatch) {
+        if (req.method !== 'DELETE') {
+          writeError(res, 405, 'method-not-allowed', '只支持 DELETE。')
+          return
+        }
+        try {
+          const connectionId = ConnectionIdSchema.parse(decodeURIComponent(deleteMatch[1] ?? ''))
+          const params = HostApiContracts.deleteConnection.parseParams({ connectionId })
+          const body = HostApiContracts.deleteConnection.parseRequest(await readJsonBody(req))
+          const result = await runtime.deleteConnection(params.connectionId, body)
+          writeContractJson(res, 200, HostApiContracts.deleteConnection, {
+            connectionId: params.connectionId,
+            archived: result.archived,
+          })
+        } catch (error) {
+          writeError(res, 400, 'connection-delete-failed', error instanceof Error ? error.message : String(error))
         }
         return
       }
@@ -4026,7 +4170,8 @@ export const createNekroHostApi = (
     },
   })
 
-  const unsubscribeConnectionChanges = runtime.subscribeConnectionChanges(() => {
+  const unsubscribeConnectionChanges = runtime.subscribeConnectionChanges((event) => {
+    if (event) broadcast({ event: 'connection-fact', data: projectConnectionEvent(runtime, event) })
     broadcast({ event: 'status', data: { ok: true, message: '连接状态已更新' } })
   })
   const unsubscribeRuntimeStatus = runtime.host.subscribeRuntimeStatus(() => {
@@ -4315,8 +4460,7 @@ export const createNekroHostApi = (
     },
   })
 
-  // Catch-all under /api: slice-2 endpoints (QQ Connection, Extension save &
-  // capability changes) return 501 this round.
+  // Catch-all for unknown API endpoints.
   registerRoute({
     kind: 'prefix',
     path: '/api',

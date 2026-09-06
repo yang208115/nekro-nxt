@@ -5,7 +5,7 @@ import {
   defineAdapterConnection,
   parseAdapterCapabilities,
   parseAdapterConnectionConfiguration,
-  parseAdapterInboundEvent,
+  parseAdapterChannelInboundEvent,
 } from '../src/index.ts'
 
 const ExampleConfigurationSchema = z
@@ -25,7 +25,10 @@ const EXAMPLE_CONNECTION_DEFINITION = defineAdapterConnection({
   key: 'example',
   displayName: 'Example',
   description: 'Example platform',
-  userCreatable: true,
+  provisioning: 'user-created',
+  channelKinds: ['direct', 'group'],
+  activities: [],
+  features: {},
   configurationSchema: ExampleConfigurationSchema,
   credentialsSchema: ExampleCredentialsSchema,
   configSchema: {
@@ -50,7 +53,7 @@ type ExampleCredentials = z.output<typeof ExampleCredentialsSchema>
 describe('Adapter wire contracts', () => {
   it('accepts a normalized inbound file event without inventing a video type', () => {
     expect(
-      parseAdapterInboundEvent({
+      parseAdapterChannelInboundEvent({
         connectionId: 'con_1',
         channelId: 'chn_1',
         adapterKey: 'fake',
@@ -63,7 +66,7 @@ describe('Adapter wire contracts', () => {
       }).parts,
     ).toEqual([{ type: 'file', assetId: 'ast_video', name: 'clip.mp4' }])
     expect(
-      parseAdapterInboundEvent({
+      parseAdapterChannelInboundEvent({
         connectionId: 'con_1',
         channelId: 'chn_1',
         adapterKey: 'fake',
@@ -79,7 +82,7 @@ describe('Adapter wire contracts', () => {
 
   it('rejects missing dedupe facts and invalid limits', () => {
     expect(() =>
-      parseAdapterInboundEvent({
+      parseAdapterChannelInboundEvent({
         connectionId: 'con_1',
         channelId: 'chn_1',
         adapterKey: 'fake',
@@ -91,15 +94,18 @@ describe('Adapter wire contracts', () => {
     ).toThrow()
     expect(() =>
       parseAdapterCapabilities({
-        text: true,
-        mentions: true,
-        images: true,
-        files: true,
-        audio: true,
-        replies: true,
-        mixedContent: true,
-        proactiveSend: true,
-        maxTextLength: 0,
+        outbound: {
+          text: true,
+          mentions: true,
+          images: true,
+          files: true,
+          audio: true,
+          replies: true,
+          mixedContent: true,
+          proactiveSend: true,
+          maxTextLength: 0,
+        },
+        activities: {},
       }),
     ).toThrow()
   })
@@ -164,14 +170,33 @@ describe('Adapter wire contracts', () => {
 
 describe('AdapterRegistry', () => {
   const contribution = {
-    apiVersion: 1 as const,
+    apiVersion: 2 as const,
     descriptor: {
       key: 'fixture-adapter',
       displayName: 'Fixture Adapter',
       description: 'Synthetic registry fixture.',
-      userCreatable: true,
+      provisioning: 'user-created' as const,
       aliasEditable: true,
       channelDiscovery: 'adapter-observed' as const,
+      channelKinds: ['direct', 'group'] as const,
+      activities: [
+        {
+          key: 'fixture.notice',
+          scope: 'channel' as const,
+          displayName: 'Fixture notice',
+          description: 'Synthetic channel activity.',
+          triggerable: true,
+          channelKinds: ['group'] as const,
+        },
+        {
+          key: 'fixture.account-change',
+          scope: 'connection' as const,
+          displayName: 'Fixture account change',
+          description: 'Synthetic connection activity.',
+          triggerable: false,
+        },
+      ],
+      features: { processingFeedback: { channelKinds: ['group'] as const } },
       diagnostics: { receive: true, send: true },
       configSchema: { schemaVersion: 1, type: 'object' as const, required: [], properties: {} },
     },
@@ -196,12 +221,13 @@ describe('AdapterRegistry', () => {
     expect(registry.register('other-revision', contribution).contribution).toBe(contribution)
   })
 
-  it('derives non-user-creatable descriptor defaults', () => {
+  it('derives system-singleton descriptor defaults', () => {
     const definition = defineAdapterConnection({
       key: 'managed',
       displayName: 'Managed',
       description: 'System-managed fixture.',
-      userCreatable: false,
+      provisioning: 'system-singleton',
+      channelKinds: ['internal'],
       configurationSchema: z.object({}).strict(),
       credentialsSchema: z.object({}).strict(),
       configSchema: { schemaVersion: 1, type: 'object', required: [], properties: {} },
@@ -215,7 +241,7 @@ describe('AdapterRegistry', () => {
   })
 
   it('rejects every malformed owner, API version, and descriptor boundary', () => {
-    const register = (descriptor: unknown, owner = 'invalid-fixture', apiVersion: number = 1) => {
+    const register = (descriptor: unknown, owner = 'invalid-fixture', apiVersion: number = 2) => {
       const registry = new AdapterRegistry()
       Reflect.apply(registry.register.bind(registry), undefined, [
         owner,
@@ -225,10 +251,30 @@ describe('AdapterRegistry', () => {
     const descriptor = contribution.descriptor
 
     expect(() => register(descriptor, ' ')).toThrow('owner must not be empty')
-    expect(() => register(descriptor, 'invalid-version', 2)).toThrow('Unsupported Adapter Host API version')
+    expect(() => register(descriptor, 'invalid-version', 1)).toThrow('Unsupported Adapter Host API version')
     expect(() => register({ ...descriptor, key: '' })).toThrow('key must not be empty')
     expect(() => register({ ...descriptor, key: 'X' })).toThrow('lowercase letters')
     expect(() => register({ ...descriptor, displayName: ' ' })).toThrow('displayName must not be empty')
+    expect(() => register({ ...descriptor, channelKinds: [] })).toThrow('at least one Channel kind')
+    expect(() => register({ ...descriptor, channelKinds: ['group', 'group'] })).toThrow('must not contain duplicates')
+    expect(() =>
+      register({
+        ...descriptor,
+        activities: [...descriptor.activities, { ...descriptor.activities[0] }],
+      }),
+    ).toThrow('activity key is duplicated')
+    expect(() =>
+      register({
+        ...descriptor,
+        activities: [{ ...descriptor.activities[1], triggerable: true }],
+      }),
+    ).toThrow('Connection activity cannot trigger')
+    expect(() =>
+      register({
+        ...descriptor,
+        activities: [{ ...descriptor.activities[0], channelKinds: ['direct', 'internal'] }],
+      }),
+    ).toThrow('unsupported Channel kind')
     expect(() => register({ ...descriptor, configSchema: { ...descriptor.configSchema, type: 'array' } })).toThrow(
       'schema must be an object',
     )

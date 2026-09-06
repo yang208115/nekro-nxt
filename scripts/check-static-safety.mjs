@@ -9,7 +9,6 @@ const root = process.cwd()
 const baselinePath = 'scripts/baselines/static-safety.json'
 const sourceRoots = ['apps', 'packages']
 const sourcePattern = /\.(?:cts|mts|ts|tsx)$/u
-const concreteAdapterKeys = new Set(['web', 'qq-openclaw', 'onebot-11', 'wecom-ai-bot'])
 const sqlStart =
   /^\s*(?:SELECT\b[\s\S]*\bFROM\b|INSERT\s+INTO\b|UPDATE\s+[A-Za-z_][\w$]*\s+SET\b|DELETE\s+FROM\b|CREATE\s+(?:(?:UNIQUE|VIRTUAL)\s+)?(?:INDEX|TABLE|TRIGGER|VIEW)\b|ALTER\s+TABLE\b|DROP\s+(?:INDEX|TABLE|TRIGGER|VIEW)\b|PRAGMA\s+[A-Za-z_]|BEGIN(?:\s+(?:DEFERRED|EXCLUSIVE|IMMEDIATE|TRANSACTION))?\s*;?\s*$|COMMIT\s*;?\s*$|ROLLBACK\s*;?\s*$|WITH\b[\s\S]*\b(?:DELETE|INSERT|SELECT|UPDATE)\b)/iu
 const exemptFiles = new Set([
@@ -87,6 +86,11 @@ function scanFile(file, fixedExceptions) {
   const kind = relative.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS
   const sourceFile = ts.createSourceFile(file, content, ts.ScriptTarget.Latest, true, kind)
   const findings = []
+  const isMainApplication = relative.startsWith('apps/server/src/') || relative.startsWith('apps/web/src/')
+
+  const isAdapterKeyExpression = (node) =>
+    (ts.isIdentifier(node) && node.text === 'adapterKey') ||
+    (ts.isPropertyAccessExpression(node) && node.name.text === 'adapterKey')
 
   function report(rule, node, message) {
     const text = normalizedText(node, sourceFile)
@@ -108,16 +112,38 @@ function scanFile(file, fixedExceptions) {
   function visit(node) {
     if (
       ts.isBinaryExpression(node) &&
-      (relative.startsWith('apps/server/src/') || relative.startsWith('apps/web/src/')) &&
-      (concreteAdapterKeys.has(stringValue(node.left) ?? '') ||
-        concreteAdapterKeys.has(stringValue(node.right) ?? '')) &&
-      normalizedText(node, sourceFile).includes('adapterKey')
+      isMainApplication &&
+      [
+        ts.SyntaxKind.EqualsEqualsToken,
+        ts.SyntaxKind.EqualsEqualsEqualsToken,
+        ts.SyntaxKind.ExclamationEqualsToken,
+        ts.SyntaxKind.ExclamationEqualsEqualsToken,
+      ].includes(node.operatorToken.kind) &&
+      ((isAdapterKeyExpression(node.left) && stringValue(node.right) !== undefined) ||
+        (isAdapterKeyExpression(node.right) && stringValue(node.left) !== undefined))
     ) {
       report(
         'platform-key-branch',
         node,
         'Server 与通用 Web 页面必须通过 Adapter descriptor/Registry 能力分支，不能判断具体平台 key',
       )
+    }
+    if (ts.isImportDeclaration(node) && isMainApplication) {
+      const moduleName = stringValue(node.moduleSpecifier)
+      if (
+        moduleName?.startsWith('@nekro-nxt/adapter-') &&
+        moduleName !== '@nekro-nxt/adapter-sdk' &&
+        !(relative.startsWith('apps/server/src/') && moduleName === '@nekro-nxt/adapter-builtin-roster')
+      ) {
+        report('concrete-adapter-import', node, '主应用只能导入 Adapter SDK；Server 额外允许第一方 roster。')
+      }
+    }
+    if (
+      isMainApplication &&
+      (ts.isStringLiteralLike(node) || ts.isNoSubstitutionTemplateLiteral(node)) &&
+      /(?:qq-group|qq-direct|\bQQ\b|OneBot|企业微信)/u.test(node.text)
+    ) {
+      report('platform-name-in-main-app', node, '主应用生产源码不得编码具体平台名称或旧频道类型。')
     }
     if (ts.isCallExpression(node)) {
       const member = propertyName(node.expression)

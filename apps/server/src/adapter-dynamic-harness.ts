@@ -1,10 +1,10 @@
 import { z } from 'zod'
 
-export const ADAPTER_DYNAMIC_EVIDENCE_METHOD = '__nekro_nxt_adapter_evidence_v1'
+export const ADAPTER_DYNAMIC_EVIDENCE_METHOD = '__nekro_nxt_adapter_evidence_v2'
 
 export const AdapterDynamicEvidenceSchema = z
   .object({
-    apiVersion: z.literal(1),
+    apiVersion: z.literal(2),
     descriptor: z
       .object({
         key: z.string().trim().min(1),
@@ -26,12 +26,13 @@ const ADAPTER_DYNAMIC_HARNESS_SOURCE = String.raw`
 const __nxtAdapterRegistrations = []
 harness.registerAdapter = (contribution) => {
   if (__nxtAdapterRegistrations.length > 0) throw new Error('one Adapter Revision can register only one contribution')
-  if (!contribution || contribution.apiVersion !== 1 || typeof contribution.create !== 'function') {
-    throw new Error('harness.registerAdapter requires AdapterHostContributionV1')
+  if (!contribution || contribution.apiVersion !== 2 || typeof contribution.create !== 'function') {
+    throw new Error('harness.registerAdapter requires AdapterHostContributionV2')
   }
   const descriptor = JSON.parse(JSON.stringify(contribution.descriptor))
   const validation = (async () => {
     const channels = new Map()
+    const identities = new Map()
     const members = new Map()
     const states = new Map()
     const diagnostics = []
@@ -39,14 +40,19 @@ harness.registerAdapter = (contribution) => {
     const credentialsResolved = []
     let inboundCommitted = false
     let channelSequence = 0
+    let identitySequence = 0
     let memberSequence = 0
     const signal = { aborted: false, addEventListener() {}, removeEventListener() {}, throwIfAborted() {} }
     const context = {
       connectionId: 'con_VALIDATE',
       now: () => 1,
-      acceptInbound: async () => {
+      acceptChannelInbound: async () => {
         inboundCommitted = true
         return { channelEventId: 'evt_VALIDATE', inserted: true }
+      },
+      acceptConnectionInbound: async () => {
+        inboundCommitted = true
+        return { connectionEventId: 'cev_VALIDATE', inserted: true }
       },
       channels: {
         ensure: async (input) => {
@@ -56,6 +62,12 @@ harness.registerAdapter = (contribution) => {
         updateDisplayName: async () => {},
         resolvePlatformChannelId: async (channelId) => [...channels].find((entry) => entry[1] === channelId)?.[0],
         resolveKind: async () => 'group'
+      },
+      identities: {
+        ensure: async (input) => {
+          if (!identities.has(input.platformUserId)) identities.set(input.platformUserId, 'pid_VALIDATE' + (++identitySequence))
+          return identities.get(input.platformUserId)
+        }
       },
       members: {
         ensure: async (input) => {
@@ -145,7 +157,7 @@ harness.registerAdapter = (contribution) => {
       stopped = true
     }
     return {
-      apiVersion: 1,
+      apiVersion: 2,
       descriptor,
       registered: true,
       started,

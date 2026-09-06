@@ -15,7 +15,7 @@ const mapleChannelId = ChannelIdSchema.parse('chn_dragmaple')
 const mapleSpareChannelId = ChannelIdSchema.parse('chn_dragmaplespare')
 const clerkChannelId = ChannelIdSchema.parse('chn_dragclerk')
 const extraChannelId = ChannelIdSchema.parse('chn_dragextra')
-const webConnectionId = ConnectionIdSchema.parse('con_dragweb')
+const internalConnectionId = ConnectionIdSchema.parse('con_draginternal')
 
 const dragTo = async (page: Page, source: Locator, target: Locator): Promise<void> => {
   const from = await source.boundingBox()
@@ -57,13 +57,20 @@ test('work tree keeps titles stable while full rows and keyboard handles cover o
   const baseResponse = await request.get('/api/snapshot')
   expect(baseResponse.ok()).toBe(true)
   const baseSnapshot = HostApiContracts.snapshot.response.parse(await baseResponse.json())
-  const webConnection = baseSnapshot.connections.find((connection) => connection.adapterKey === 'web')
-  if (!webConnection) throw new Error('测试快照缺少网页连接。')
+  const internalDescriptor = baseSnapshot.connectionAdapters.find(
+    ({ provisioning, channelKinds }) => provisioning === 'system-singleton' && channelKinds.includes('internal'),
+  )
+  const internalConnection = baseSnapshot.connections.find(
+    (connection) => connection.adapterKey === internalDescriptor?.key,
+  )
+  if (!internalConnection) throw new Error('测试快照缺少内置连接。')
 
   let snapshot: HostSnapshot = {
     ...baseSnapshot,
     connections: baseSnapshot.connections.map((connection) =>
-      connection.id === webConnection.id ? { ...connection, id: webConnectionId, channelCount: 3 } : connection,
+      connection.id === internalConnection.id
+        ? { ...connection, id: internalConnectionId, channelCount: 3 }
+        : connection,
     ),
     agents: [
       {
@@ -142,9 +149,9 @@ test('work tree keeps titles stable while full rows and keyboard handles cover o
     channels: [
       {
         id: mapleChannelId,
-        connectionId: webConnectionId,
-        platformChannelId: 'web-maple',
-        kind: 'web',
+        connectionId: internalConnectionId,
+        platformChannelId: 'internal-maple',
+        kind: 'internal',
         displayName: '规划员的内置频道',
         boundAgentId: mapleId,
         runtimePhase: 'idle',
@@ -154,16 +161,16 @@ test('work tree keeps titles stable while full rows and keyboard handles cover o
             agentId: mapleId,
             triggerPolicy: 'always',
             processingFeedback: 'auto',
-            eventTriggers: [],
+            activityTriggerOverrides: {},
             boundAt: 1,
           },
         ],
       },
       {
         id: mapleSpareChannelId,
-        connectionId: webConnectionId,
-        platformChannelId: 'web-maple-spare',
-        kind: 'web',
+        connectionId: internalConnectionId,
+        platformChannelId: 'internal-maple-spare',
+        kind: 'internal',
         displayName: '规划员的备用地',
         boundAgentId: mapleId,
         runtimePhase: 'idle',
@@ -173,16 +180,16 @@ test('work tree keeps titles stable while full rows and keyboard handles cover o
             agentId: mapleId,
             triggerPolicy: 'always',
             processingFeedback: 'auto',
-            eventTriggers: [],
+            activityTriggerOverrides: {},
             boundAt: 1,
           },
         ],
       },
       {
         id: clerkChannelId,
-        connectionId: webConnectionId,
-        platformChannelId: 'web-clerk',
-        kind: 'web',
+        connectionId: internalConnectionId,
+        platformChannelId: 'internal-clerk',
+        kind: 'internal',
         displayName: '资料员的内置频道',
         boundAgentId: clerkId,
         runtimePhase: 'idle',
@@ -192,7 +199,7 @@ test('work tree keeps titles stable while full rows and keyboard handles cover o
             agentId: clerkId,
             triggerPolicy: 'always',
             processingFeedback: 'auto',
-            eventTriggers: [],
+            activityTriggerOverrides: {},
             boundAt: 2,
           },
         ],
@@ -229,16 +236,16 @@ test('work tree keeps titles stable while full rows and keyboard handles cover o
   )
   await page.route('**/api/channels', async (route) => {
     if (route.request().method() !== 'POST') return route.continue()
-    const input = HostApiContracts.createWebChannel.request.parse(route.request().postDataJSON())
+    const input = HostApiContracts.createInternalChannel.request.parse(route.request().postDataJSON())
     snapshot = {
       ...snapshot,
       channels: [
         ...snapshot.channels,
         {
           id: extraChannelId,
-          connectionId: webConnectionId,
-          platformChannelId: 'web-extra',
-          kind: 'web',
+          connectionId: internalConnectionId,
+          platformChannelId: 'internal-extra',
+          kind: 'internal',
           displayName: input.displayName,
           runtimePhase: 'idle',
           bindings: [],
@@ -248,7 +255,7 @@ test('work tree keeps titles stable while full rows and keyboard handles cover o
     return route.fulfill({
       status: 201,
       contentType: 'application/json',
-      body: JSON.stringify({ channelId: extraChannelId, connectionId: webConnectionId }),
+      body: JSON.stringify({ channelId: extraChannelId, connectionId: internalConnectionId }),
     })
   })
   await page.route('**/api/bindings', async (route) => {
@@ -259,7 +266,7 @@ test('work tree keeps titles stable while full rows and keyboard handles cover o
       agentId: input.agentId,
       triggerPolicy: input.triggerPolicy,
       processingFeedback: input.processingFeedback ?? 'auto',
-      eventTriggers: input.eventTriggers ?? [],
+      activityTriggerOverrides: input.activityTriggerOverrides ?? {},
       boundAt: 3,
     }
     snapshot = {

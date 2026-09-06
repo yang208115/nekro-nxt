@@ -122,9 +122,9 @@ describe('OneBot 11 normalized inbound', () => {
       facts: { mentionedBot: true },
       parts: [{ type: 'text', text: '你好' }, { type: 'mention' }],
     })
-    expect(fake.events.find(({ activityType }) => activityType === 'member-poked')).toMatchObject({
+    expect(fake.events.find(({ activityKey }) => activityKey === 'member-poked')).toMatchObject({
       kind: 'control',
-      activityType: 'member-poked',
+      activityKey: 'member-poked',
     })
   })
 
@@ -170,7 +170,7 @@ describe('OneBot 11 normalized inbound', () => {
     }
     await waitFor(() => fake.events.length === 3)
     await runtime.stop()
-    expect(fake.events.map(({ activityType }) => activityType).sort()).toEqual([
+    expect(fake.events.map(({ activityKey }) => activityKey).sort()).toEqual([
       'member-card-changed',
       'member-muted',
       'message-reaction-added',
@@ -545,11 +545,10 @@ describe('OneBot 11 normalized inbound', () => {
     }
     socket.send(JSON.stringify({ post_type: 'notice', notice_type: 'unknown_fixture', group_id: 'ignored' }))
     socket.send(JSON.stringify({ post_type: 'notice', notice_type: 'friend_add' }))
-    await waitFor(() => fake.events.length === notices.length)
-    expect(fake.events.map(({ activityType }) => activityType)).toEqual(
+    await waitFor(() => fake.events.length + fake.connectionEvents.length === notices.length)
+    expect(fake.events.map(({ activityKey }) => activityKey)).toEqual(
       expect.arrayContaining([
         'message-recalled',
-        'profile-liked',
         'member-joined',
         'member-left',
         'member-muted',
@@ -562,11 +561,12 @@ describe('OneBot 11 normalized inbound', () => {
         'file-uploaded',
         'essence-added',
         'essence-removed',
-        'friend-added',
       ]),
     )
+    expect(fake.connectionEvents.map(({ activityKey }) => activityKey)).toEqual(['profile-liked', 'friend-added'])
+    expect(fake.channels.has('private:friend-2')).toBe(false)
     expect(renamed).toEqual(['新频道名'])
-    const joinedEvent = fake.events.find(({ activityType }) => activityType === 'member-joined')
+    const joinedEvent = fake.events.find(({ activityKey }) => activityKey === 'member-joined')
     expect(joinedEvent).toMatchObject({
       facts: {
         subType: 'invite',
@@ -584,21 +584,21 @@ describe('OneBot 11 normalized inbound', () => {
     expect(typeof joinedOperatorMemberId).toBe('string')
     if (typeof joinedSubjectMemberId === 'string') expect(joinedSubjectMemberId).toMatch(/^mbr_/u)
     if (typeof joinedOperatorMemberId === 'string') expect(joinedOperatorMemberId).toMatch(/^mbr_/u)
-    expect(fake.events.find(({ activityType }) => activityType === 'member-left')?.parts).toEqual([
+    expect(fake.events.find(({ activityKey }) => activityKey === 'member-left')?.parts).toEqual([
       expect.objectContaining({ type: 'mention' }),
       { type: 'text', text: ' 将 ' },
       expect.objectContaining({ type: 'mention' }),
       { type: 'text', text: ' 移出了频道。' },
     ])
-    expect(fake.events.find(({ activityType }) => activityType === 'member-card-changed')?.parts).toEqual([
+    expect(fake.events.find(({ activityKey }) => activityKey === 'member-card-changed')?.parts).toEqual([
       expect.objectContaining({ type: 'mention' }),
       { type: 'text', text: ' 将群名片从「旧名片」改为「新名片」。' },
     ])
-    expect(fake.events.find(({ activityType }) => activityType === 'channel-name-changed')?.parts).toEqual([
+    expect(fake.events.find(({ activityKey }) => activityKey === 'channel-name-changed')?.parts).toEqual([
       expect.objectContaining({ type: 'mention' }),
       { type: 'text', text: ' 将频道名称改为「新频道名」。' },
     ])
-    expect(fake.events.find(({ activityType }) => activityType === 'file-uploaded')).toMatchObject({
+    expect(fake.events.find(({ activityKey }) => activityKey === 'file-uploaded')).toMatchObject({
       facts: { fileSize: 1536 },
       parts: [
         { type: 'mention' },

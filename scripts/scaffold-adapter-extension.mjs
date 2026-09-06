@@ -33,17 +33,20 @@ const moduleFrom = 'from'
 const files = new Map([
   [
     'source/definition.ts',
-    `import type { AdapterHostContributionV1 } from '@nekro-nxt/extension-sdk'
+    `import type { AdapterHostContributionV2 } from '@nekro-nxt/extension-sdk'
 ${moduleImport} { createRuntime } ${moduleFrom} './runtime.js'
 
 export const ADAPTER_KEY = ${q(key)}
-export const descriptor: AdapterHostContributionV1['descriptor'] = {
+export const descriptor: AdapterHostContributionV2['descriptor'] = {
   key: ADAPTER_KEY,
   displayName: ${q(displayName)},
   description: '连接 ${displayName}；请将示例协议替换为平台公开协议。',
-  userCreatable: true,
+  provisioning: 'user-created',
   aliasEditable: true,
   channelDiscovery: 'adapter-observed',
+  channelKinds: ['group'],
+  activities: [],
+  features: {},
   diagnostics: { receive: true, send: true },
   configSchema: {
     schemaVersion: 1,
@@ -57,8 +60,8 @@ export const descriptor: AdapterHostContributionV1['descriptor'] = {
   },
 }
 
-export const contribution: AdapterHostContributionV1 = {
-  apiVersion: 1,
+export const contribution: AdapterHostContributionV2 = {
+  apiVersion: 2,
   descriptor,
   create: (context, stored) => Promise.resolve(createRuntime(context, stored)),
 }
@@ -124,14 +127,17 @@ export const createRuntime = (
   if (!tokenReference) throw new Error('Missing token credential reference.')
   return {
     capabilities: {
-      text: true,
-      mentions: false,
-      images: false,
-      files: false,
-      audio: false,
-      replies: false,
-      mixedContent: false,
-      proactiveSend: true,
+      outbound: {
+        text: true,
+        mentions: false,
+        images: false,
+        files: false,
+        audio: false,
+        replies: false,
+        mixedContent: false,
+        proactiveSend: true,
+      },
+      activities: {},
     },
     async start() {
       socket = await connectEvents(context, websocketUrl, tokenReference)
@@ -152,7 +158,7 @@ export const createRuntime = (
             ...(input.senderName === undefined ? {} : { displayName: input.senderName }),
             observedAt: context.now(),
           })
-          await context.acceptInbound({
+          await context.acceptChannelInbound({
             connectionId: context.connectionId,
             channelId,
             adapterKey: ADAPTER_KEY,

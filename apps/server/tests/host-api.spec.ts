@@ -172,11 +172,11 @@ describe('NekroNxt Server domain API (WebServer seam)', () => {
           channelId: ChannelIdSchema.parse('chn_ACTIVITY1'),
           occurredAt: 1_700_000_000_000,
           senderMemberId: memberId,
-          activityType: 'member-joined',
+          activityKey: 'member-joined',
           parts: [
             {
               type: 'rich',
-              adapterKey: 'onebot-11',
+              adapterKey: 'fixture-beta',
               kind: 'member-joined',
               summary: '一名成员加入了频道。',
             },
@@ -185,7 +185,7 @@ describe('NekroNxt Server domain API (WebServer seam)', () => {
       ).toMatchObject({
         role: 'system',
         sender: { memberId },
-        activityType: 'member-joined',
+        activityKey: 'member-joined',
       })
     } finally {
       await runtime.dispose()
@@ -221,7 +221,7 @@ describe('NekroNxt Server domain API (WebServer seam)', () => {
     }
   })
 
-  it('creates an intelligent-agent, admits a Web message, and exposes only the communication-tool reply', async () => {
+  it('creates an intelligent-agent, admits an internal message, and exposes only the communication-tool reply', async () => {
     const directory = await mkdtemp(path.join(tmpdir(), 'nekro-nxt-host-api-'))
     temporaryDirectories.push(directory)
     const runtime = await NekroRuntime.create({
@@ -324,7 +324,7 @@ describe('NekroNxt Server domain API (WebServer seam)', () => {
       runtime.core.appendInbound({
         connectionId: created.connectionId,
         channelId: created.channelId,
-        adapterKey: 'web',
+        adapterKey: runtime.core.getConnection(created.connectionId)!.adapterKey,
         platformEventId: 'member-projection-1',
         kind: 'message-created',
         senderMemberId: sender.id,
@@ -338,18 +338,19 @@ describe('NekroNxt Server domain API (WebServer seam)', () => {
         facts: { mentionedBot: true },
       })
 
-      // The authoritative snapshot exposes the new intelligent-agent + its Web Channel.
+      // The authoritative snapshot exposes the new intelligent-agent and its internal Channel.
       const snapshot = HostApiContracts.snapshot.parseResponse(await (await fetch(`${origin}/api/snapshot`)).json())
       expect(snapshot.models.find((model) => model.id === 'chat-model')).toMatchObject({
         provider: 'test-provider',
         name: 'Chat model',
       })
-      expect(snapshot.connectionAdapters).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({ key: 'web', userCreatable: false }),
-          expect.objectContaining({ key: 'qq-openclaw', displayName: 'QQ 官方机器人', userCreatable: true }),
-        ]),
-      )
+      expect(
+        snapshot.connectionAdapters.some(
+          (descriptor) =>
+            descriptor.provisioning === 'system-singleton' && descriptor.channelKinds.includes('internal'),
+        ),
+      ).toBe(true)
+      expect(snapshot.connectionAdapters.some((descriptor) => descriptor.provisioning === 'user-created')).toBe(true)
       expect(snapshot.agents.some((agent) => agent.id === created.agentId)).toBe(true)
       expect(snapshot.agents.find((agent) => agent.id === created.agentId)?.displayName).toBe('网页智能体')
       expect(snapshot.agents.find((agent) => agent.id === created.agentId)?.runtimeStatus).toBe('idle')
@@ -392,9 +393,15 @@ describe('NekroNxt Server domain API (WebServer seam)', () => {
       )
       expect(renamedSnapshot.channels.find((channel) => channel.id === created.channelId)).toMatchObject({
         displayName: '本地识别名称',
-        platformChannelId: `web-${created.agentId}`,
+        platformChannelId: `internal-${created.agentId}`,
       })
-      const externalConnection = runtime.core.createConnection({ adapterKey: 'qq-openclaw', config: {} })
+      const externalDescriptor = renamedSnapshot.connectionAdapters.find(
+        ({ provisioning, activities }) =>
+          provisioning === 'user-created' &&
+          activities.some((activity) => activity.scope === 'channel' && activity.triggerable),
+      )
+      if (!externalDescriptor) throw new Error('测试快照缺少可创建的外部 Adapter。')
+      const externalConnection = runtime.core.createConnection({ adapterKey: externalDescriptor.key, config: {} })
       const aliasResponse = await fetch(`${origin}/api/connections/${externalConnection.id}/alias`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
@@ -411,14 +418,87 @@ describe('NekroNxt Server domain API (WebServer seam)', () => {
       expect(aliasedSnapshot.connections.find((connection) => connection.id === externalConnection.id)).toMatchObject({
         alias: '外部机器人',
       })
-      const firstUsersResponse = await fetch(`${origin}/api/platform-users?adapterKey=web&limit=1`)
+      const triggerableActivity = externalDescriptor.activities.find(
+        (activity) => activity.scope === 'channel' && activity.triggerable,
+      )
+      if (!triggerableActivity) throw new Error('测试 Adapter 缺少可触发频道活动。')
+      const defaultsResponse = await fetch(
+        `${origin}/api/connections/${externalConnection.id}/activity-trigger-defaults`,
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ activityKeys: [triggerableActivity.key] }),
+        },
+      )
+      expect(defaultsResponse.status).toBe(200)
+      expect(
+        HostApiContracts.updateConnectionActivityTriggerDefaults.parseResponse(await defaultsResponse.json()),
+      ).toEqual({ connectionId: externalConnection.id, activityKeys: [triggerableActivity.key] })
+
+      const restorableChannel = runtime.core.createChannel({
+        connectionId: externalConnection.id,
+        platformChannelId: 'restorable-channel',
+        kind: triggerableActivity.channelKinds?.[0] ?? 'group',
+      })
+      const archiveResponse = await fetch(`${origin}/api/connections/${externalConnection.id}`, {
+        method: 'DELETE',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ deleteChannelData: false }),
+      })
+      expect(archiveResponse.status).toBe(200)
+      expect(HostApiContracts.deleteConnection.parseResponse(await archiveResponse.json())).toEqual({
+        connectionId: externalConnection.id,
+        archived: true,
+      })
+      const archivedSnapshot = HostApiContracts.snapshot.parseResponse(
+        await (await fetch(`${origin}/api/snapshot`)).json(),
+      )
+      expect(archivedSnapshot.connections.some(({ id }) => id === externalConnection.id)).toBe(false)
+      expect(archivedSnapshot.channels.some(({ id }) => id === restorableChannel.id)).toBe(false)
+      expect(archivedSnapshot.archivedConnections).toContainEqual(
+        expect.objectContaining({ id: externalConnection.id, channelCount: 1 }),
+      )
+
+      const restoreResponse = await fetch(`${origin}/api/connections/${externalConnection.id}/restore`, {
+        method: 'POST',
+      })
+      expect(restoreResponse.status).toBe(200)
+      expect(HostApiContracts.restoreConnection.parseResponse(await restoreResponse.json())).toEqual({
+        connectionId: externalConnection.id,
+        restored: true,
+      })
+      const restoredSnapshot = HostApiContracts.snapshot.parseResponse(
+        await (await fetch(`${origin}/api/snapshot`)).json(),
+      )
+      expect(
+        restoredSnapshot.connections.find(({ id }) => id === externalConnection.id)?.activityTriggerDefaults,
+      ).toEqual([triggerableActivity.key])
+      expect(restoredSnapshot.channels.some(({ id }) => id === restorableChannel.id)).toBe(true)
+
+      const purgeResponse = await fetch(`${origin}/api/connections/${externalConnection.id}`, {
+        method: 'DELETE',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ deleteChannelData: true }),
+      })
+      expect(purgeResponse.status).toBe(200)
+      expect(runtime.repository.getChannelReference(restorableChannel.id)).toBeUndefined()
+      expect(runtime.repository.getArchivedConnection(externalConnection.id)).toBeUndefined()
+      const internalConnection = runtime.core.getConnection(created.connectionId)
+      if (!internalConnection) throw new Error('测试快照缺少内置连接。')
+      const internalDescriptor = aliasedSnapshot.connectionAdapters.find(
+        ({ key }) => key === internalConnection.adapterKey,
+      )
+      if (!internalDescriptor) throw new Error('测试快照缺少内置 Adapter Descriptor。')
+      const firstUsersResponse = await fetch(
+        `${origin}/api/platform-users?adapterKey=${encodeURIComponent(internalConnection.adapterKey)}&limit=1`,
+      )
       expect(firstUsersResponse.status).toBe(200)
       const firstUsers = HostApiContracts.listPlatformUsers.parseResponse(await firstUsersResponse.json())
       expect(firstUsers).toMatchObject({
         total: 2,
         items: [
           expect.objectContaining({
-            adapter: { key: 'web', displayName: '内置频道' },
+            adapter: { key: internalConnection.adapterKey, displayName: internalDescriptor.displayName },
             activeChannelCount: 1,
             historicalOnly: false,
           }),
@@ -455,10 +535,10 @@ describe('NekroNxt Server domain API (WebServer seam)', () => {
         bytes: pngBytes,
         declaredMediaType: 'image/png',
       })
-      await runtime.channels.acceptInbound({
+      await runtime.channels.acceptChannelInbound({
         connectionId: created.connectionId,
         channelId: created.channelId,
-        adapterKey: 'web',
+        adapterKey: runtime.core.getConnection(runtime.internalConnectionId)!.adapterKey,
         platformEventId: 'asset-http-event',
         platformMessageId: 'asset-http-message',
         kind: 'message-created',
@@ -473,7 +553,7 @@ describe('NekroNxt Server domain API (WebServer seam)', () => {
       expect(assetResponse.headers.get('content-type')).toBe('image/png')
       expect(new Uint8Array(await assetResponse.arrayBuffer())).toEqual(pngBytes)
 
-      // Admit a Web message through the real HTTP surface.
+      // Admit an internal message through the real HTTP surface.
       const admitted = await fetch(`${origin}/api/channels/${created.channelId}/messages`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
@@ -482,7 +562,7 @@ describe('NekroNxt Server domain API (WebServer seam)', () => {
       expect(admitted.status).toBe(200)
 
       // Wait for the DSH Agent Loop to settle (the scripted model replies via send_channel_message).
-      const web = runtime.web
+      const web = runtime.internalChannel
       const session = runtime.host
       const before = Date.now()
       // Poll the Channel history endpoint until the agent reply lands (bounded wait, no fake clock).
@@ -571,13 +651,13 @@ describe('NekroNxt Server domain API (WebServer seam)', () => {
         body: JSON.stringify({ displayName: '独立网页台' }),
       })
       expect(extraChannelResponse.status).toBe(201)
-      const extraChannel = HostApiContracts.createWebChannel.parseResponse(await extraChannelResponse.json())
+      const extraChannel = HostApiContracts.createInternalChannel.parseResponse(await extraChannelResponse.json())
       const extraSnapshot = HostApiContracts.snapshot.parseResponse(
         await (await fetch(`${origin}/api/snapshot`)).json(),
       )
       expect(extraSnapshot.channels.find((channel) => channel.id === extraChannel.channelId)).toMatchObject({
         displayName: '独立网页台',
-        kind: 'web',
+        kind: 'internal',
         bindings: [],
       })
 
@@ -612,8 +692,8 @@ describe('NekroNxt Server domain API (WebServer seam)', () => {
         model: { provider: 'test-provider', model: 'chat-model' },
       },
       {
-        connectionId: runtime.webConnectionId,
-        kind: 'web',
+        connectionId: runtime.internalConnectionId,
+        kind: 'internal',
         triggerPolicy: 'always',
       },
     )
@@ -675,8 +755,8 @@ describe('NekroNxt Server domain API (WebServer seam)', () => {
         model: { provider: 'test-provider', model: 'chat-model' },
       },
       {
-        connectionId: runtime.webConnectionId,
-        kind: 'web',
+        connectionId: runtime.internalConnectionId,
+        kind: 'internal',
         triggerPolicy: 'always',
       },
     )
@@ -687,10 +767,10 @@ describe('NekroNxt Server domain API (WebServer seam)', () => {
     const api = createNekroHostApi(webContext.webServer, runtime)
     const origin = `http://127.0.0.1:${api.port}`
     const admit = (dedupeKey: string) =>
-      runtime.channels.acceptInbound({
-        connectionId: runtime.webConnectionId,
+      runtime.channels.acceptChannelInbound({
+        connectionId: runtime.internalConnectionId,
         channelId: seeded.channel.id,
-        adapterKey: 'web',
+        adapterKey: runtime.core.getConnection(runtime.internalConnectionId)!.adapterKey,
         kind: 'message-created',
         parts: [{ type: 'text', text: dedupeKey }],
         platformTimestamp: Date.now(),
@@ -730,9 +810,9 @@ describe('NekroNxt Server domain API (WebServer seam)', () => {
       expect(runtime.repository.getActiveEpisode(seeded.channel.id, seeded.definition.id)).toBeUndefined()
 
       const removableChannel = runtime.core.createChannel({
-        connectionId: runtime.webConnectionId,
+        connectionId: runtime.internalConnectionId,
         platformChannelId: 'manual-removable-channel',
-        kind: 'web',
+        kind: 'internal',
         displayName: '可删除内置频道',
       })
       runtime.core.createBinding({
@@ -740,10 +820,10 @@ describe('NekroNxt Server domain API (WebServer seam)', () => {
         agentId: seeded.definition.id,
         triggerPolicy: 'always',
       })
-      const removableEvent = await runtime.channels.acceptInbound({
-        connectionId: runtime.webConnectionId,
+      const removableEvent = await runtime.channels.acceptChannelInbound({
+        connectionId: runtime.internalConnectionId,
         channelId: removableChannel.id,
-        adapterKey: 'web',
+        adapterKey: runtime.core.getConnection(runtime.internalConnectionId)!.adapterKey,
         kind: 'message-created',
         parts: [{ type: 'text', text: '频道删除前的历史' }],
         platformTimestamp: Date.now(),
@@ -809,15 +889,15 @@ describe('NekroNxt Server domain API (WebServer seam)', () => {
           persona: '',
           model: { provider: 'test-provider', model: 'chat-model' },
         },
-        { connectionId: runtime.webConnectionId, kind: 'web', triggerPolicy: 'always' },
+        { connectionId: runtime.internalConnectionId, kind: 'internal', triggerPolicy: 'always' },
       )
       const manualBuiltIn = runtime.core.createChannel({
-        connectionId: runtime.webConnectionId,
+        connectionId: runtime.internalConnectionId,
         platformChannelId: 'manual-built-in-kept',
-        kind: 'web',
+        kind: 'internal',
       })
       const external = runtime.core.createChannel({
-        connectionId: runtime.webConnectionId,
+        connectionId: runtime.internalConnectionId,
         platformChannelId: 'external-kept',
         kind: 'group',
       })
@@ -855,7 +935,7 @@ describe('NekroNxt Server domain API (WebServer seam)', () => {
           persona: '',
           model: { provider: 'test-provider', model: 'chat-model' },
         },
-        { connectionId: runtime.webConnectionId, kind: 'web', triggerPolicy: 'always' },
+        { connectionId: runtime.internalConnectionId, kind: 'internal', triggerPolicy: 'always' },
       )
       const keptDelete = await fetch(`${origin}/api/agents/${kept.definition.id}`, {
         method: 'DELETE',
@@ -1194,8 +1274,8 @@ describe('NekroNxt Server domain API (WebServer seam)', () => {
         model: { provider: 'old-provider', model: 'old-model', reasoningEffort: 'high' },
       },
       {
-        connectionId: runtime.webConnectionId,
-        kind: 'web',
+        connectionId: runtime.internalConnectionId,
+        kind: 'internal',
         triggerPolicy: 'always',
       },
     )

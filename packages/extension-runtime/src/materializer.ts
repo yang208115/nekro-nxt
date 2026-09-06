@@ -55,7 +55,7 @@ const inputSchema = z
               z
                 .object({
                   kind: z.literal('adapter'),
-                  apiVersion: z.literal(1),
+                  apiVersion: z.literal(2),
                   key: z.string().trim().min(1),
                   descriptorDigest: z.string().regex(/^[a-f0-9]{64}$/u),
                 })

@@ -355,7 +355,7 @@ describe('WeCom AI bot protocol mapping', () => {
       })
     }
     await waitFor(() => fake.events.length === 3)
-    expect(fake.events.map(({ activityType }) => activityType)).toEqual([
+    expect(fake.events.map(({ activityKey }) => activityKey)).toEqual([
       'conversation-entered',
       'card-action-invoked',
       'message-feedback-negative',

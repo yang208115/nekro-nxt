@@ -19,6 +19,7 @@ import {
   HostApiErrorSchema,
   ChannelFactSseDataSchema,
   ChannelRuntimeSseDataSchema,
+  HostConnectionEventSchema,
   HostSseStatusDataSchema,
   buildHostApiContractPath,
   type ChannelFactSseData,
@@ -28,6 +29,7 @@ import {
   type HostApiContractRequest,
   type HostApiRequest,
   type HostApiResponse,
+  type HostConnectionEvent,
 } from '@nekro-nxt/contracts'
 import { providerDisplayName } from './provider-labels.js'
 import type { ProductHostPort, ProductSnapshot } from './product-port.js'
@@ -91,11 +93,7 @@ const sseEventData = (event: unknown): string | undefined => {
 const formatTime = (occurredAt: number): string =>
   new Date(occurredAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
 
-const visibleText = (text: string): string =>
-  text
-    .replaceAll('[QQ 消息不包含可处理内容]', '该消息包含暂不支持显示的内容。')
-    .replaceAll('[QQ 表情]', '[表情]')
-    .replace(/<faceType=\d+,faceId="[^"]*",ext="[^"]*">/gu, '[表情]')
+const visibleText = (text: string): string => text
 
 export const renderConversationBody = (
   parts: readonly {
@@ -148,6 +146,7 @@ const emptySnapshot = (): ProductSnapshot => ({
   messages: [],
   channelRuntimes: {},
   connections: [],
+  archivedConnections: [],
   extensions: [],
   hostUi: { preferencesRevision: 0, pages: [] },
   platformUsersRevision: 0,
@@ -221,9 +220,23 @@ const projectAdapterDescriptor = (
   key: descriptor.key,
   displayName: descriptor.displayName,
   description: descriptor.description,
-  userCreatable: descriptor.userCreatable,
+  provisioning: descriptor.provisioning,
   aliasEditable: descriptor.aliasEditable,
   channelDiscovery: descriptor.channelDiscovery,
+  channelKinds: descriptor.channelKinds,
+  activities: descriptor.activities.map((activity) => ({
+    key: activity.key,
+    scope: activity.scope,
+    displayName: activity.displayName,
+    description: activity.description,
+    triggerable: activity.triggerable,
+    ...(activity.icon === undefined ? {} : { icon: activity.icon }),
+    ...(activity.channelKinds === undefined ? {} : { channelKinds: activity.channelKinds }),
+  })),
+  features:
+    descriptor.features.processingFeedback === undefined
+      ? {}
+      : { processingFeedback: { channelKinds: descriptor.features.processingFeedback.channelKinds } },
   diagnostics: descriptor.diagnostics,
   configSchema: {
     schemaVersion: descriptor.configSchema.schemaVersion,
@@ -237,12 +250,6 @@ const projectAdapterDescriptor = (
     ),
   },
 })
-
-const platformChannelLabel = (platformChannelId: string, kind: 'group' | 'direct' = 'group'): string => {
-  const suffix = platformChannelId.trim().match(/([\p{L}\p{N}]{4})$/u)?.[1]
-  const type = kind === 'group' ? '群聊' : '私聊'
-  return suffix ? `${type}（尾号 ${suffix}）` : `未命名${type}`
-}
 
 const projectConversationMessage = (
   message: SnapshotMessageJson,
@@ -338,7 +345,7 @@ const projectConversationMessage = (
     id: message.id,
     channelId: message.channelId,
     role: message.role === 'agent' ? 'agent' : message.role === 'system' ? 'system' : 'member',
-    ...(message.activityType === undefined ? {} : { activityType: message.activityType }),
+    ...(message.activityKey === undefined ? {} : { activityKey: message.activityKey }),
     author:
       message.role === 'agent'
         ? (sourceAgent?.name ?? '智能体')
@@ -346,7 +353,7 @@ const projectConversationMessage = (
           ? '频道事件'
           : message.sender !== undefined
             ? nonEmptyLabel(message.sender.displayName, '群成员')
-            : sourceChannel?.kind === 'web'
+            : sourceChannel?.kind === 'internal'
               ? '你'
               : '群成员',
     body: renderConversationBody(message.parts),
@@ -421,11 +428,9 @@ const projectSnapshot = (json: SnapshotJson, successfulAt: number): ProductSnaps
     connectionId: channel.connectionId,
     name: nonEmptyLabel(
       channel.displayName,
-      channel.kind === 'web'
-        ? '未命名内置频道'
-        : platformChannelLabel(channel.platformChannelId, channel.kind === 'group' ? 'group' : 'direct'),
+      channel.kind === 'internal' ? '未命名内置频道' : channel.kind === 'group' ? '未命名群聊' : '未命名私聊',
     ),
-    kind: channel.kind === 'group' ? 'qq-group' : channel.kind === 'direct' ? 'qq-direct' : 'web',
+    kind: channel.kind === 'group' ? 'group' : channel.kind === 'direct' ? 'direct' : 'internal',
     connectionName: connectionNameById.get(channel.connectionId) ?? '未命名连接',
     agentId: channel.boundAgentId ?? '',
     runtimePhase: runtimePhaseToState(channel.runtimePhase),
@@ -442,7 +447,7 @@ const projectSnapshot = (json: SnapshotJson, successfulAt: number): ProductSnaps
       agentId: binding.agentId,
       triggerPolicy: binding.triggerPolicy,
       processingFeedback: binding.processingFeedback,
-      eventTriggers: binding.eventTriggers,
+      activityTriggerOverrides: binding.activityTriggerOverrides,
     })),
     unread: 0,
   }))
@@ -459,36 +464,39 @@ const projectSnapshot = (json: SnapshotJson, successfulAt: number): ProductSnaps
   const connections: ConnectionSummary[] = json.connections.map((connection) => {
     const adapterName = connectionAdapterName(connection)
     const descriptor = json.connectionAdapters.find(({ key }) => key === connection.adapterKey)
-    const gatewayState = connection.gateway?.state ?? connection.status.state
+    const runtimeState = connection.status.state
     return {
       id: connection.id,
       ...(connection.alias === undefined ? {} : { alias: connection.alias }),
       name: adapterName,
       adapter: adapterName,
       adapterKey: connection.adapterKey,
-      userManaged: descriptor?.userCreatable ?? true,
+      userManaged: descriptor?.provisioning === 'user-created',
       state:
-        gatewayState === 'connected'
+        runtimeState === 'connected'
           ? '已连接'
-          : gatewayState === 'failed'
+          : runtimeState === 'failed'
             ? '异常'
-            : connection.credentialConfigured
+            : connection.status.credentialConfigured
               ? '已配置'
               : '已断开',
-      appId: connection.appId ?? connection.status.accountId ?? '',
-      credentialConfigured: connection.credentialConfigured ?? connection.status.credentialConfigured,
-      gatewayState,
-      lastError: connection.gateway?.lastError ?? connection.status.message ?? '',
-      proactiveSend: connection.proactiveSend ?? connection.status.proactiveSend,
+      accountReference: connection.status.accountReference ?? '',
+      credentialConfigured: connection.status.credentialConfigured,
+      runtimeState,
+      lastError: connection.status.message ?? '',
+      proactiveSend: connection.status.proactiveSend,
+      activityCapabilities: connection.status.activities,
+      activityTriggerDefaults: connection.activityTriggerDefaults,
+      ...(connection.status.processingFeedback === undefined
+        ? {}
+        : { processingFeedbackCapability: connection.status.processingFeedback }),
       channels: connection.channelCount ?? 0,
       knownChannels: (connection.knownChannels ?? []).map((channel) => ({
         ...channel,
-        name:
-          channel.kind === 'group' && /^(?:group|guild):/u.test(channel.name)
-            ? platformChannelLabel(channel.name)
-            : channel.kind !== 'group' && /^(?:private|c2c):/u.test(channel.name)
-              ? platformChannelLabel(channel.name, 'direct')
-              : nonEmptyLabel(channel.name, channel.kind === 'group' ? '未命名群聊' : '未命名频道'),
+        name: nonEmptyLabel(
+          channel.name,
+          channel.kind === 'group' ? '未命名群聊' : channel.kind === 'direct' ? '未命名私聊' : '未命名内置频道',
+        ),
       })),
       lastEvent:
         connection.lastInbound === undefined
@@ -496,6 +504,21 @@ const projectSnapshot = (json: SnapshotJson, successfulAt: number): ProductSnaps
           : new Date(connection.lastInbound.receivedAt).toLocaleString('zh-CN'),
       receiveTest: testLabel(connection.receiveTest),
       sendTest: testLabel(connection.sendTest),
+      events: [],
+      eventsLoaded: false,
+      eventsLoading: false,
+      eventsHasMore: true,
+    }
+  })
+  const archivedConnections = json.archivedConnections.map((connection) => {
+    const descriptor = json.connectionAdapters.find(({ key }) => key === connection.adapterKey)
+    return {
+      id: connection.id,
+      adapterKey: connection.adapterKey,
+      ...(connection.alias === undefined ? {} : { alias: connection.alias }),
+      adapter: descriptor?.displayName ?? '适配器未安装',
+      channelCount: connection.channelCount,
+      archivedAt: connection.archivedAt,
     }
   })
   const extensionsLocal = json.extensions.map((extension) => {
@@ -663,6 +686,7 @@ const projectSnapshot = (json: SnapshotJson, successfulAt: number): ProductSnaps
     messages,
     channelRuntimes: {},
     connections,
+    archivedConnections,
     workTreeOrder: json.workTreeOrder,
     extensions: extensionsLocal,
     hostUi: json.hostUi,
@@ -779,6 +803,16 @@ export class HttpProductHost implements ProductHostPort {
         this.#snapshot = { ...this.#snapshot, platformUsersRevision: this.#snapshot.platformUsersRevision + 1 }
         this.#applyChannelFact(parsed.data)
       },
+      'connection-fact': (event) => {
+        const rawData = sseEventData(event)
+        if (rawData === undefined) return
+        try {
+          const parsed = HostConnectionEventSchema.safeParse(JSON.parse(rawData))
+          if (parsed.success) this.#applyConnectionFact(parsed.data)
+        } catch {
+          // A malformed connection fact is isolated from the rest of the stream.
+        }
+      },
       runtime: (event) => {
         const rawData = sseEventData(event)
         if (rawData === undefined) return
@@ -852,6 +886,19 @@ export class HttpProductHost implements ProductHostPort {
           ...(typeof input?.['connectionId'] === 'string' ? { connectionId: input['connectionId'] } : {}),
           ...(typeof input?.['cursor'] === 'string' ? { cursor: input['cursor'] } : {}),
           limit: typeof input?.['limit'] === 'number' ? input['limit'] : 50,
+        },
+        undefined,
+      )
+    }
+    if (command === 'connections.listEvents') {
+      const connectionId = typeof input?.['connectionId'] === 'string' ? input['connectionId'] : ''
+      return await this.#call(
+        HostApiContracts.listConnectionEvents,
+        {
+          connectionId,
+          ...(typeof input?.['beforeReceivedAt'] === 'number' ? { beforeReceivedAt: input['beforeReceivedAt'] } : {}),
+          ...(typeof input?.['beforeId'] === 'string' ? { beforeId: input['beforeId'] } : {}),
+          limit: typeof input?.['limit'] === 'number' ? input['limit'] : 30,
         },
         undefined,
       )
@@ -1038,10 +1085,35 @@ export class HttpProductHost implements ProductHostPort {
       await this.#refreshAndNotify()
       return result
     }
-    if (command === 'channels.createWeb') {
+    if (command === 'connections.updateActivityTriggerDefaults') {
+      const connectionId = typeof input?.['connectionId'] === 'string' ? input['connectionId'] : ''
+      const activityKeys = Array.isArray(input?.['activityKeys']) ? input['activityKeys'] : undefined
+      if (!connectionId.trim()) throw new Error('缺少连接标识，请刷新页面后重试。')
+      const body = HostApiContracts.updateConnectionActivityTriggerDefaults.request.parse({ activityKeys })
+      const result = await this.#call(HostApiContracts.updateConnectionActivityTriggerDefaults, { connectionId }, body)
+      await this.#refreshAndNotify()
+      return result
+    }
+    if (command === 'connections.delete') {
+      const connectionId = typeof input?.['connectionId'] === 'string' ? input['connectionId'] : ''
+      const deleteChannelData = input?.['deleteChannelData']
+      if (!connectionId.trim()) throw new Error('缺少连接标识，请刷新页面后重试。')
+      if (typeof deleteChannelData !== 'boolean') throw new Error('请选择是否同时删除频道数据。')
+      const result = await this.#call(HostApiContracts.deleteConnection, { connectionId }, { deleteChannelData })
+      await this.#refreshAndNotify()
+      return result
+    }
+    if (command === 'connections.restore') {
+      const connectionId = typeof input?.['connectionId'] === 'string' ? input['connectionId'] : ''
+      if (!connectionId.trim()) throw new Error('缺少连接标识，请刷新页面后重试。')
+      const result = await this.#call(HostApiContracts.restoreConnection, { connectionId }, undefined)
+      await this.#refreshAndNotify()
+      return result
+    }
+    if (command === 'channels.createInternal') {
       const displayName = typeof input?.['displayName'] === 'string' ? input['displayName'] : ''
       if (!displayName.trim()) throw new Error('请输入频道名称。')
-      const result = await this.#call(HostApiContracts.createWebChannel, {}, { displayName: displayName.trim() })
+      const result = await this.#call(HostApiContracts.createInternalChannel, {}, { displayName: displayName.trim() })
       await this.#refreshAndNotify()
       return result
     }
@@ -1051,7 +1123,9 @@ export class HttpProductHost implements ProductHostPort {
       const triggerPolicy = isTriggerPolicy(input?.['triggerPolicy']) ? input['triggerPolicy'] : undefined
       const processingFeedback =
         input?.['processingFeedback'] === 'off' ? 'off' : input?.['processingFeedback'] === 'auto' ? 'auto' : undefined
-      const eventTriggers = Array.isArray(input?.['eventTriggers']) ? input['eventTriggers'] : undefined
+      const activityTriggerOverrides = isRecord(input?.['activityTriggerOverrides'])
+        ? HostApiContracts.createBinding.request.shape.activityTriggerOverrides.parse(input['activityTriggerOverrides'])
+        : undefined
       if (!agentId.trim()) throw new Error('缺少智能体标识，请刷新页面后重试。')
       if (!channelId.trim()) throw new Error('请选择要绑定的频道。')
       if (triggerPolicy === undefined) {
@@ -1065,7 +1139,7 @@ export class HttpProductHost implements ProductHostPort {
           channelId,
           triggerPolicy,
           ...(processingFeedback === undefined ? {} : { processingFeedback }),
-          ...(eventTriggers === undefined ? {} : { eventTriggers }),
+          ...(activityTriggerOverrides === undefined ? {} : { activityTriggerOverrides }),
         },
       )
       await this.#refreshAndNotify()
@@ -1403,6 +1477,19 @@ export class HttpProductHost implements ProductHostPort {
     this.#listener?.()
   }
 
+  #applyConnectionFact(event: HostConnectionEvent): void {
+    const connections = this.#snapshot.connections.map((connection) => {
+      if (connection.id !== event.connectionId) return connection
+      return {
+        ...connection,
+        events: [event, ...connection.events.filter((candidate) => candidate.id !== event.id)],
+        eventsLoaded: true,
+      }
+    })
+    this.#snapshot = { ...this.#snapshot, connections, platformUsersRevision: this.#snapshot.platformUsersRevision + 1 }
+    this.#listener?.()
+  }
+
   #applyRuntimeFrame(data: ChannelRuntimeSseData): void {
     const view = this.#runtimeViewFromProjection(data)
     this.#writeRuntimeView(view, { includeTurns: false })
@@ -1535,10 +1622,23 @@ export class HttpProductHost implements ProductHostPort {
       return failure
     }
     const projected = projectSnapshot(json, Date.now())
+    const previousConnections = new Map(this.#snapshot.connections.map((connection) => [connection.id, connection]))
     this.#snapshot = {
       ...projected,
       messages: this.#loadedChannels.size > 0 ? this.#snapshot.messages : projected.messages,
       channelRuntimes: this.#snapshot.channelRuntimes,
+      connections: projected.connections.map((connection) => {
+        const previous = previousConnections.get(connection.id)
+        return previous === undefined
+          ? connection
+          : {
+              ...connection,
+              events: previous.events,
+              eventsLoaded: previous.eventsLoaded,
+              eventsLoading: previous.eventsLoading,
+              eventsHasMore: previous.eventsHasMore,
+            }
+      }),
       platformUsersRevision: this.#snapshot.platformUsersRevision,
     }
     for (const message of this.#snapshot.messages) this.#loadedChannels.add(message.channelId)

@@ -114,7 +114,11 @@ const TreeActivityIndicator = ({ state }: { readonly state: AgentSummary['state'
 
 const ChannelRowBody = ({ item }: { readonly item: ChannelSummary; readonly active?: boolean }) => (
   <>
-    {item.kind === 'web' ? <MessageSquare size={15} aria-hidden="true" /> : <UsersRound size={15} aria-hidden="true" />}
+    {item.kind === 'internal' ? (
+      <MessageSquare size={15} aria-hidden="true" />
+    ) : (
+      <UsersRound size={15} aria-hidden="true" />
+    )}
     <span className={styles.treeCopy}>
       <strong>{item.name}</strong>
       <small>{item.connectionName}</small>
@@ -417,8 +421,8 @@ function WorkTree() {
   const [overId, setOverId] = useState('')
   const [activeId, setActiveId] = useState('')
   const [intent, setIntent] = useState<BindingChangeIntent>()
-  const [createWebOpen, setCreateWebOpen] = useState(false)
-  const [webChannelName, setWebChannelName] = useState('内置频道')
+  const [createInternalOpen, setCreateInternalOpen] = useState(false)
+  const [internalChannelName, setInternalChannelName] = useState('内置频道')
   const treeBodyRef = useRef<HTMLDivElement>(null)
   const suppressClickRef = useRef(false)
   const suppressClickTimerRef = useRef<number>()
@@ -716,8 +720,8 @@ function WorkTree() {
                   channelActiveId={channelActiveId}
                   onGuardedClick={guardClick}
                   onCreate={() => {
-                    setWebChannelName('内置频道')
-                    setCreateWebOpen(true)
+                    setInternalChannelName('内置频道')
+                    setCreateInternalOpen(true)
                   }}
                 />
               </div>
@@ -739,26 +743,30 @@ function WorkTree() {
         onCloseAutoFocus={(event) => event.preventDefault()}
       />
       <ConfirmDialog
-        open={createWebOpen}
-        onOpenChange={setCreateWebOpen}
+        open={createInternalOpen}
+        onOpenChange={setCreateInternalOpen}
         title="新建内置频道"
         description="在 NekroNXT 中新建一个未绑定的内置频道，再拖到智能体上交给它响应。"
         confirmLabel="创建内置频道"
         onConfirm={async () => {
-          const name = webChannelName.trim()
+          const name = internalChannelName.trim()
           if (!name) return false
           try {
-            await useProductStore.getState().createWebChannel({ displayName: name })
-            notify('内置频道已创建。', 'success', 'web-channel-create')
+            await useProductStore.getState().createInternalChannel({ displayName: name })
+            notify('内置频道已创建。', 'success', 'internal-channel-create')
             return true
           } catch (error) {
-            notify(error instanceof Error ? error.message : String(error), 'error', 'web-channel-create')
+            notify(error instanceof Error ? error.message : String(error), 'error', 'internal-channel-create')
             return false
           }
         }}
       >
         <Field label="频道名称">
-          <Input value={webChannelName} onChange={(event) => setWebChannelName(event.target.value)} maxLength={120} />
+          <Input
+            value={internalChannelName}
+            onChange={(event) => setInternalChannelName(event.target.value)}
+            maxLength={120}
+          />
         </Field>
       </ConfirmDialog>
     </>
@@ -770,7 +778,7 @@ function ConnectionTree() {
   const connections = useProductStore((state) => state.connections)
   const host = useProductStore((state) => state.host)
   const descriptors = useProductStore((state) => state.connectionAdapters)
-  const canCreate = descriptors.some((descriptor) => descriptor.userCreatable)
+  const canCreate = descriptors.some((descriptor) => descriptor.provisioning === 'user-created')
   return (
     <>
       <div className={shell.treeHead}>

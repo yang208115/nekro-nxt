@@ -1,7 +1,7 @@
 import type {
   AdapterConnectionContext,
   AdapterConnectionInteractions,
-  AdapterInboundEvent,
+  AdapterChannelInboundEvent,
 } from '@nekro-nxt/adapter-sdk'
 import {
   AgentIdSchema,
@@ -14,6 +14,7 @@ import {
 } from '@nekro-nxt/contracts'
 import type {
   AdmissionId,
+  AdapterActivityKey,
   AgentId,
   AgentRevisionId,
   ChannelEventId,
@@ -30,11 +31,13 @@ import type {
   AgentDefinitionRecord,
   AgentRevisionRecord,
   AppendChannelEventCommit,
+  AppendConnectionEventCommit,
   BindingRecord,
   ChannelEventRecord,
   ChannelRecord,
   ChannelMemberRecord,
   ConnectionRecord,
+  ConnectionEventRecord,
   CoreRepository,
   CreateAgentCommit,
   CreateAgentWithChannelCommit,
@@ -62,9 +65,11 @@ class MemoryCoreRepository implements CoreRepository {
   readonly agents = new Map<AgentId, CreateAgentCommit>()
   readonly revisions = new Map<AgentRevisionId, AgentRevisionRecord>()
   readonly connections = new Map<ConnectionId, ConnectionRecord>()
+  readonly archivedConnections = new Map<ConnectionId, { record: ConnectionRecord; archivedAt: number }>()
   readonly channels = new Map<ChannelId, ChannelRecord>()
   readonly bindings: BindingRecord[] = []
   readonly events = new Map<string, ChannelEventRecord>()
+  readonly connectionEvents = new Map<string, ConnectionEventRecord>()
   readonly identities = new Map<PlatformIdentityId, PlatformIdentityRecord>()
   readonly members = new Map<ChannelMemberId, ChannelMemberRecord>()
 
@@ -146,11 +151,43 @@ class MemoryCoreRepository implements CoreRepository {
         adapterKey: current.adapterKey,
         config: current.config,
         credentialRefs: current.credentialRefs,
+        activityTriggerDefaults: current.activityTriggerDefaults,
         createdAt: current.createdAt,
       })
     } else {
       this.connections.set(id, { ...current, alias })
     }
+  }
+  updateConnectionActivityTriggerDefaults(
+    id: ConnectionId,
+    activityTriggerDefaults: readonly AdapterActivityKey[],
+  ): void {
+    const current = this.connections.get(id)
+    if (!current) throw new Error(`Unknown connection: ${id}`)
+    this.connections.set(id, { ...current, activityTriggerDefaults })
+  }
+  archiveConnection(id: ConnectionId, archivedAt: number): void {
+    const record = this.connections.get(id)
+    if (!record) throw new Error(`Unknown connection: ${id}`)
+    this.connections.delete(id)
+    this.archivedConnections.set(id, { record, archivedAt })
+  }
+  restoreConnection(id: ConnectionId): void {
+    const archived = this.archivedConnections.get(id)
+    if (!archived) throw new Error(`Unknown archived connection: ${id}`)
+    this.archivedConnections.delete(id)
+    this.connections.set(id, archived.record)
+  }
+  purgeConnection(id: ConnectionId): void {
+    if (!this.connections.delete(id) && !this.archivedConnections.delete(id))
+      throw new Error(`Unknown connection: ${id}`)
+  }
+  getArchivedConnection(id: ConnectionId) {
+    const archived = this.archivedConnections.get(id)
+    return archived ? { ...archived.record, archivedAt: archived.archivedAt } : undefined
+  }
+  listArchivedConnections() {
+    return [...this.archivedConnections.values()].map(({ record, archivedAt }) => ({ ...record, archivedAt }))
   }
   getConnection(id: ConnectionId) {
     return this.connections.get(id)
@@ -245,6 +282,28 @@ class MemoryCoreRepository implements CoreRepository {
     if (existing) return { event: existing, inserted: false }
     this.events.set(key, candidate)
     return { event: candidate, inserted: true }
+  }
+  appendConnectionEvent(candidate: ConnectionEventRecord): AppendConnectionEventCommit {
+    const key = `${candidate.connectionId}:${candidate.dedupeKey}`
+    const existing = this.connectionEvents.get(key)
+    if (existing) return { event: existing, inserted: false }
+    this.connectionEvents.set(key, candidate)
+    return { event: candidate, inserted: true }
+  }
+  listConnectionEvents(
+    connectionId: ConnectionId,
+    options: Parameters<CoreRepository['listConnectionEvents']>[1] = {},
+  ) {
+    return [...this.connectionEvents.values()]
+      .filter(
+        (event) =>
+          event.connectionId === connectionId &&
+          (options.before === undefined ||
+            event.receivedAt < options.before.receivedAt ||
+            (event.receivedAt === options.before.receivedAt && event.id < options.before.id)),
+      )
+      .sort((left, right) => right.receivedAt - left.receivedAt || right.id.localeCompare(left.id))
+      .slice(0, options.limit ?? 50)
   }
   getChannelEvent(id: ChannelEventId) {
     return [...this.events.values()].find((event) => event.id === id)
@@ -579,7 +638,7 @@ const setup = async (
   const context: AdapterConnectionContext = {
     connectionId: connection.id,
     now: () => currentTime,
-    acceptInbound: () => Promise.reject(new Error('test calls runtime directly')),
+    acceptChannelInbound: () => Promise.reject(new Error('test calls runtime directly')),
   }
   const adapter = new FakeAdapterConnection(context, { ...FAKE_ADAPTER_CAPABILITIES, mixedContent })
   if (feedbackInteractions !== undefined) {
@@ -592,6 +651,8 @@ const setup = async (
     now: () => currentTime,
     nextUlid: () => `R${++runtimeId}`,
     resolveAdapter: (id) => (id === connection.id ? adapter : undefined),
+    isActivityTriggerEnabledByDefault: (_channelId, activityKey) =>
+      core.getConnection(connection.id)?.activityTriggerDefaults.includes(activityKey) === true,
     adapterState: {
       load: (_connectionId, key) => Promise.resolve(adapterStateRows.get(key)),
       save: (_connectionId, key, value) => {
@@ -640,7 +701,7 @@ const inbound = (
   channelId: ChannelId,
   eventId = 'event-1',
   receivedAt = 102,
-): AdapterInboundEvent => ({
+): AdapterChannelInboundEvent => ({
   connectionId,
   channelId,
   adapterKey: 'fake',
@@ -667,7 +728,7 @@ describe('ChannelRuntime M1 lane', () => {
       retractOwnMessage: () => Promise.resolve({ status: 'succeeded' }),
       nudgeMember: () => Promise.resolve({ status: 'succeeded' }),
     })
-    await context.runtime.acceptInbound({
+    await context.runtime.acceptChannelInbound({
       ...inbound(context.connection.id, context.channel.id, 'feedback-message'),
       platformMessageId: 'platform-message-1',
     })
@@ -696,7 +757,7 @@ describe('ChannelRuntime M1 lane', () => {
       },
     })
     context.sessionDriver.whenIdle = () => idle
-    await context.runtime.acceptInbound({
+    await context.runtime.acceptChannelInbound({
       ...inbound(context.connection.id, context.channel.id, 'feedback-cancelled'),
       platformMessageId: 'platform-cancelled',
     })
@@ -731,7 +792,7 @@ describe('ChannelRuntime M1 lane', () => {
         return Promise.resolve({ status: 'succeeded' })
       },
     })
-    await context.runtime.acceptInbound(inbound(context.connection.id, context.channel.id, 'interaction-anchor'))
+    await context.runtime.acceptChannelInbound(inbound(context.connection.id, context.channel.id, 'interaction-anchor'))
     const episode = [...context.runtimeRepository.episodes.values()][0]!
     context.adapter.queueReceipt({ status: 'sent', platformMessageId: 'outbound-platform-1' })
     const sent = await context.runtime.sendMessage({
@@ -752,7 +813,7 @@ describe('ChannelRuntime M1 lane', () => {
     expect(replay).toEqual(first)
     expect(retractCalls).toEqual(['outbound-platform-1'])
     expect([...context.coreRepository.events.values()]).toContainEqual(
-      expect.objectContaining({ activityType: 'message-recalled', targetPlatformMessageId: 'outbound-platform-1' }),
+      expect.objectContaining({ activityKey: 'message-recalled', targetPlatformMessageId: 'outbound-platform-1' }),
     )
 
     const members = ['member-a', 'member-b', 'member-c', 'member-d'].map(
@@ -848,7 +909,7 @@ describe('ChannelRuntime M1 lane', () => {
     expect(finishes).toContain('platform-feedback')
     expect(context.adapterStateRows.has(key)).toBe(false)
 
-    await context.runtime.acceptInbound({
+    await context.runtime.acceptChannelInbound({
       ...inbound(context.connection.id, context.channel.id, 'feedback-disabled'),
       platformMessageId: 'platform-after-disable',
     })
@@ -862,7 +923,7 @@ describe('ChannelRuntime M1 lane', () => {
       retractOwnMessage: () => Promise.resolve({ status: 'succeeded' }),
       nudgeMember: () => Promise.resolve({ status: 'succeeded' }),
     })
-    await context.runtime.acceptInbound({
+    await context.runtime.acceptChannelInbound({
       ...inbound(context.connection.id, context.channel.id, 'feedback-start-failed'),
       platformMessageId: 'platform-start-failed',
     })
@@ -908,7 +969,9 @@ describe('ChannelRuntime M1 lane', () => {
       retractOwnMessage: () => Promise.resolve({ status: 'succeeded' }),
       nudgeMember: () => Promise.resolve({ status: 'succeeded' }),
     })
-    await context.runtime.acceptInbound(inbound(context.connection.id, context.channel.id, 'restore-interactions'))
+    await context.runtime.acceptChannelInbound(
+      inbound(context.connection.id, context.channel.id, 'restore-interactions'),
+    )
     const episode = [...context.runtimeRepository.episodes.values()][0]!
     const member = context.core.observeChannelMember({
       connectionId: context.connection.id,
@@ -1024,7 +1087,7 @@ describe('ChannelRuntime M1 lane', () => {
       },
       nudgeMember: () => Promise.resolve({ status: 'succeeded' }),
     })
-    await context.runtime.acceptInbound(inbound(context.connection.id, context.channel.id, 'retract-matrix'))
+    await context.runtime.acceptChannelInbound(inbound(context.connection.id, context.channel.id, 'retract-matrix'))
     const episode = [...context.runtimeRepository.episodes.values()][0]!
     context.adapter.queueReceipt({ status: 'sent', platformMessageId: 'partial-1' })
     context.adapter.queueReceipt({ status: 'sent', platformMessageId: 'partial-2' })
@@ -1099,7 +1162,9 @@ describe('ChannelRuntime M1 lane', () => {
           ? Promise.reject(new Error('fixture nudge failure'))
           : Promise.resolve({ status: 'unknown', message: 'fixture unknown' }),
     })
-    await context.runtime.acceptInbound(inbound(context.connection.id, context.channel.id, 'interaction-validation'))
+    await context.runtime.acceptChannelInbound(
+      inbound(context.connection.id, context.channel.id, 'interaction-validation'),
+    )
     const episode = [...context.runtimeRepository.episodes.values()][0]!
     const member = context.core.observeChannelMember({
       connectionId: context.connection.id,
@@ -1148,7 +1213,7 @@ describe('ChannelRuntime M1 lane', () => {
     ).rejects.toThrow('找不到')
 
     const unsupported = await setup()
-    await unsupported.runtime.acceptInbound(
+    await unsupported.runtime.acceptChannelInbound(
       inbound(unsupported.connection.id, unsupported.channel.id, 'unsupported-interaction'),
     )
     const unsupportedEpisode = [...unsupported.runtimeRepository.episodes.values()][0]!
@@ -1183,54 +1248,76 @@ describe('ChannelRuntime M1 lane', () => {
 
   it('creates one Episode and Admission for a replayed inbound event', async () => {
     const context = await setup()
-    expect((await context.runtime.acceptInbound(inbound(context.connection.id, context.channel.id))).inserted).toBe(
-      true,
-    )
-    expect((await context.runtime.acceptInbound(inbound(context.connection.id, context.channel.id))).inserted).toBe(
-      false,
-    )
+    expect(
+      (await context.runtime.acceptChannelInbound(inbound(context.connection.id, context.channel.id))).inserted,
+    ).toBe(true)
+    expect(
+      (await context.runtime.acceptChannelInbound(inbound(context.connection.id, context.channel.id))).inserted,
+    ).toBe(false)
     expect(context.runtimeRepository.episodes).toHaveLength(1)
     expect(context.runtimeRepository.admissions).toHaveLength(1)
     expect(context.sessionCalls.filter((call) => call.startsWith('create:'))).toHaveLength(1)
     expect([...context.runtimeRepository.admissions.values()][0]).toMatchObject({ state: 'logged-to-session' })
   })
 
-  it('records special activity but only admits explicitly enabled event types', async () => {
+  it('resolves Connection activity defaults with per-Channel on/off overrides', async () => {
     const context = await setup()
     const activity = {
       ...inbound(context.connection.id, context.channel.id, 'poke-default'),
       kind: 'control' as const,
-      activityType: 'member-poked' as const,
+      activityKey: 'member-poked' as const,
     }
-    await context.runtime.acceptInbound(activity)
+    await context.runtime.acceptChannelInbound(activity)
     expect(context.coreRepository.events.size).toBe(1)
     expect(context.runtimeRepository.admissions).toHaveLength(0)
+
+    context.core.updateConnectionActivityTriggerDefaults(context.connection.id, ['member-poked'])
+    await context.runtime.acceptChannelInbound({
+      ...activity,
+      platformEventId: 'poke-default-enabled',
+      dedupeKey: 'event:poke-default-enabled',
+    })
+    expect(context.runtimeRepository.admissions).toHaveLength(1)
 
     await context.runtime.replaceBinding({
       channelId: context.channel.id,
       agentId: context.agent.definition.id,
       triggerPolicy: 'always',
-      eventTriggers: ['member-poked'],
+      activityTriggerOverrides: { 'member-poked': false },
     })
-    await context.runtime.acceptInbound({
+    await context.runtime.acceptChannelInbound({
+      ...activity,
+      platformEventId: 'poke-disabled',
+      dedupeKey: 'event:poke-disabled',
+    })
+    expect(context.runtimeRepository.admissions).toHaveLength(1)
+
+    context.core.updateConnectionActivityTriggerDefaults(context.connection.id, [])
+    await context.runtime.replaceBinding({
+      channelId: context.channel.id,
+      agentId: context.agent.definition.id,
+      triggerPolicy: 'always',
+      activityTriggerOverrides: { 'member-poked': true },
+    })
+    await context.runtime.acceptChannelInbound({
       ...activity,
       platformEventId: 'poke-enabled',
       dedupeKey: 'event:poke-enabled',
     })
-    expect(context.runtimeRepository.admissions).toHaveLength(1)
+    expect(context.runtimeRepository.admissions).toHaveLength(2)
 
     await context.runtime.replaceBinding({
       channelId: context.channel.id,
       agentId: context.agent.definition.id,
       triggerPolicy: 'observe-only',
-      eventTriggers: ['member-poked'],
+      activityTriggerOverrides: { 'member-poked': true },
     })
-    await context.runtime.acceptInbound({
+    await context.runtime.acceptChannelInbound({
       ...activity,
       platformEventId: 'poke-observed',
       dedupeKey: 'event:poke-observed',
     })
-    expect(context.runtimeRepository.admissions).toHaveLength(1)
+    expect(context.runtimeRepository.admissions).toHaveLength(2)
   })
 
   it('sends admin console outbound as the robot account and notifies the session without a model turn', async () => {
@@ -1267,8 +1354,8 @@ describe('ChannelRuntime M1 lane', () => {
 
     const webChannel = context.core.createChannel({
       connectionId: context.connection.id,
-      platformChannelId: 'web-console',
-      kind: 'web',
+      platformChannelId: 'internal-console',
+      kind: 'internal',
     })
     await expect(context.runtime.sendAdminConsoleMessage({ channelId: webChannel.id, ...message })).rejects.toThrow(
       'Web channels accept inbound conversation',
@@ -1294,7 +1381,7 @@ describe('ChannelRuntime M1 lane', () => {
       unavailableRuntime.sendAdminConsoleMessage({ channelId: context.channel.id, ...message }),
     ).rejects.toThrow('Connection adapter is not running')
 
-    Object.assign(context.adapter.capabilities, { proactiveSend: false })
+    Object.assign(context.adapter.capabilities.outbound, { proactiveSend: false })
     await expect(
       context.runtime.sendAdminConsoleMessage({ channelId: context.channel.id, ...message }),
     ).rejects.toThrow('Adapter does not allow proactive send')
@@ -1329,7 +1416,7 @@ describe('ChannelRuntime M1 lane', () => {
 
   it('splits non-mixed delivery, preserves partial success and deduplicates clientRequestId', async () => {
     const context = await setup(false)
-    await context.runtime.acceptInbound(inbound(context.connection.id, context.channel.id))
+    await context.runtime.acceptChannelInbound(inbound(context.connection.id, context.channel.id))
     const episode = [...context.runtimeRepository.episodes.values()][0]!
     context.adapter.queueReceipt({ status: 'sent', platformMessageId: 'platform-1' })
     context.adapter.queueReceipt({
@@ -1355,9 +1442,9 @@ describe('ChannelRuntime M1 lane', () => {
 
   it('batches triggered Channel Events that were persisted before a runtime failure', async () => {
     const context = await setup()
-    await context.runtime.acceptInbound(inbound(context.connection.id, context.channel.id, 'event-1', 101))
+    await context.runtime.acceptChannelInbound(inbound(context.connection.id, context.channel.id, 'event-1', 101))
     context.core.appendInbound(inbound(context.connection.id, context.channel.id, 'event-2', 102))
-    await context.runtime.acceptInbound(inbound(context.connection.id, context.channel.id, 'event-3', 103))
+    await context.runtime.acceptChannelInbound(inbound(context.connection.id, context.channel.id, 'event-3', 103))
     const admissions = [...context.runtimeRepository.admissions.values()]
     expect(admissions).toHaveLength(2)
     expect(admissions[1]?.eventIds).toHaveLength(2)
@@ -1365,14 +1452,14 @@ describe('ChannelRuntime M1 lane', () => {
 
   it('applies display-only revisions in place and rolls incompatible revisions into a handoff Session', async () => {
     const context = await setup()
-    await context.runtime.acceptInbound(inbound(context.connection.id, context.channel.id))
+    await context.runtime.acceptChannelInbound(inbound(context.connection.id, context.channel.id))
     const episode = [...context.runtimeRepository.episodes.values()][0]!
     const displayRevision = context.core.reviseAgent(context.agent.definition.id, context.agent.revision.id, {
       displayName: '小奈·新名称',
       persona: '',
       model: { provider: 'deepseek', model: 'v4' },
     })
-    await context.runtime.acceptInbound(inbound(context.connection.id, context.channel.id, 'event-2'))
+    await context.runtime.acceptChannelInbound(inbound(context.connection.id, context.channel.id, 'event-2'))
     expect(context.runtimeRepository.getEpisode(episode.id)).toMatchObject({
       id: episode.id,
       dshSessionId: episode.dshSessionId,
@@ -1385,7 +1472,7 @@ describe('ChannelRuntime M1 lane', () => {
       persona: '这一修改会改变模型输入。',
       model: { provider: 'deepseek', model: 'v4' },
     })
-    await context.runtime.acceptInbound(inbound(context.connection.id, context.channel.id, 'event-3', 103))
+    await context.runtime.acceptChannelInbound(inbound(context.connection.id, context.channel.id, 'event-3', 103))
     expect(context.runtimeRepository.getEpisode(episode.id)).toMatchObject({
       status: 'closed',
       closeReason: 'incompatible-revision',
@@ -1405,14 +1492,14 @@ describe('ChannelRuntime M1 lane', () => {
       persona: '这是第二次不兼容修改。',
       model: { provider: 'deepseek', model: 'v4' },
     })
-    await context.runtime.acceptInbound(inbound(context.connection.id, context.channel.id, 'event-4', 104))
+    await context.runtime.acceptChannelInbound(inbound(context.connection.id, context.channel.id, 'event-4', 104))
     expect(context.handoffInputs).toHaveLength(2)
     expect(context.handoffInputs[1]?.previousHandoff?.id).toBe(context.runtimeRepository.handoffs[0]?.id)
   })
 
   it('continues rollover with a deterministic fallback when handoff generation throws', async () => {
     const context = await setup(true, undefined, () => Promise.reject(new Error('summary unavailable')))
-    await context.runtime.acceptInbound(inbound(context.connection.id, context.channel.id))
+    await context.runtime.acceptChannelInbound(inbound(context.connection.id, context.channel.id))
     const first = [...context.runtimeRepository.episodes.values()][0]!
     context.core.reviseAgent(context.agent.definition.id, context.agent.revision.id, {
       displayName: '小奈',
@@ -1421,7 +1508,7 @@ describe('ChannelRuntime M1 lane', () => {
     })
 
     await expect(
-      context.runtime.acceptInbound(inbound(context.connection.id, context.channel.id, 'event-2', 103)),
+      context.runtime.acceptChannelInbound(inbound(context.connection.id, context.channel.id, 'event-2', 103)),
     ).resolves.toMatchObject({ inserted: true })
     expect(context.runtimeRepository.getEpisode(first.id)).toMatchObject({ status: 'closed' })
     expect([...context.runtimeRepository.episodes.values()].filter(({ status }) => status === 'active')).toHaveLength(1)
@@ -1431,11 +1518,11 @@ describe('ChannelRuntime M1 lane', () => {
 
   it('serializes one lane and injects ordinary messages that arrive while DSH is running', async () => {
     const context = await setup()
-    await context.runtime.acceptInbound(inbound(context.connection.id, context.channel.id))
+    await context.runtime.acceptChannelInbound(inbound(context.connection.id, context.channel.id))
     context.setSessionStatus('running')
     await Promise.all(
       Array.from({ length: 20 }, (_, index) =>
-        context.runtime.acceptInbound(inbound(context.connection.id, context.channel.id, `running-${index}`)),
+        context.runtime.acceptChannelInbound(inbound(context.connection.id, context.channel.id, `running-${index}`)),
       ),
     )
 
@@ -1449,7 +1536,7 @@ describe('ChannelRuntime M1 lane', () => {
 
   it('recovers a DSH-committed Admission and marks an in-flight delivery unknown without resending', async () => {
     const context = await setup()
-    await context.runtime.acceptInbound(inbound(context.connection.id, context.channel.id))
+    await context.runtime.acceptChannelInbound(inbound(context.connection.id, context.channel.id))
     const episode = [...context.runtimeRepository.episodes.values()][0]!
     const admission = [...context.runtimeRepository.admissions.values()][0]!
     context.runtimeRepository.admissions.set(admission.id, {
@@ -1492,7 +1579,7 @@ describe('ChannelRuntime M1 lane', () => {
 
   it('stops a live Episode only after the owned DSH Session reaches its cancellation boundary', async () => {
     const context = await setup()
-    await context.runtime.acceptInbound(inbound(context.connection.id, context.channel.id))
+    await context.runtime.acceptChannelInbound(inbound(context.connection.id, context.channel.id))
     const episode = [...context.runtimeRepository.episodes.values()][0]!
     expect(await context.runtime.stopEpisode(episode.id, 'permission-revoked')).toMatchObject({
       status: 'closed',
@@ -1502,7 +1589,7 @@ describe('ChannelRuntime M1 lane', () => {
     await expect(
       context.runtime.sendMessage({ episodeId: episode.id, parts: [{ type: 'text', text: '不能再发送' }] }),
     ).rejects.toThrow('inactive Episode')
-    await context.runtime.acceptInbound(inbound(context.connection.id, context.channel.id, 'fresh-event', 103))
+    await context.runtime.acceptChannelInbound(inbound(context.connection.id, context.channel.id, 'fresh-event', 103))
     const fresh = [...context.runtimeRepository.episodes.values()].find(({ status }) => status === 'active')
     expect(fresh?.id).not.toBe(episode.id)
     expect(context.runtimeRepository.handoffs).toHaveLength(0)
@@ -1510,11 +1597,11 @@ describe('ChannelRuntime M1 lane', () => {
 
   it('rolls over after the configured idle gap but never because Session context merely grew', async () => {
     const context = await setup(true, 1000)
-    await context.runtime.acceptInbound(inbound(context.connection.id, context.channel.id, 'idle-1', 100))
+    await context.runtime.acceptChannelInbound(inbound(context.connection.id, context.channel.id, 'idle-1', 100))
     const first = [...context.runtimeRepository.episodes.values()][0]!
-    await context.runtime.acceptInbound(inbound(context.connection.id, context.channel.id, 'idle-2', 1099))
+    await context.runtime.acceptChannelInbound(inbound(context.connection.id, context.channel.id, 'idle-2', 1099))
     expect(context.runtimeRepository.getEpisode(first.id)?.status).toBe('active')
-    await context.runtime.acceptInbound(inbound(context.connection.id, context.channel.id, 'idle-3', 2100))
+    await context.runtime.acceptChannelInbound(inbound(context.connection.id, context.channel.id, 'idle-3', 2100))
     expect(context.runtimeRepository.getEpisode(first.id)).toMatchObject({
       status: 'closed',
       closeReason: 'idle-timeout',
@@ -1524,7 +1611,7 @@ describe('ChannelRuntime M1 lane', () => {
 
   it('supports an explicit new Session without fabricating a new Channel Event', async () => {
     const context = await setup()
-    await context.runtime.acceptInbound(inbound(context.connection.id, context.channel.id))
+    await context.runtime.acceptChannelInbound(inbound(context.connection.id, context.channel.id))
     const first = [...context.runtimeRepository.episodes.values()][0]!
     const eventCount = context.runtimeRepository.admissions.size
     const next = await context.runtime.rolloverEpisode(first.id)
@@ -1536,7 +1623,7 @@ describe('ChannelRuntime M1 lane', () => {
 
   it('rolls every active lane for an incompatible Extension Activation at a safe boundary', async () => {
     const context = await setup()
-    await context.runtime.acceptInbound(inbound(context.connection.id, context.channel.id))
+    await context.runtime.acceptChannelInbound(inbound(context.connection.id, context.channel.id))
     const first = [...context.runtimeRepository.episodes.values()][0]!
     const [next] = await context.runtime.rolloverAgentActivations(context.agent.definition.id)
     expect(context.runtimeRepository.getEpisode(first.id)).toMatchObject({
@@ -1565,7 +1652,7 @@ describe('ChannelRuntime M1 lane', () => {
       agentId: AgentIdSchema.parse('agt_trigger'),
       triggerPolicy,
       processingFeedback: 'auto',
-      eventTriggers: [],
+      activityTriggerOverrides: {},
       boundAt: 1,
     })
 
@@ -1580,7 +1667,7 @@ describe('ChannelRuntime M1 lane', () => {
     expect(isTriggered(binding('always'), event({ consoleAnchor: true }))).toBe(false)
 
     const context = await setup()
-    await context.runtime.acceptInbound(inbound(context.connection.id, context.channel.id, 'initial'))
+    await context.runtime.acceptChannelInbound(inbound(context.connection.id, context.channel.id, 'initial'))
     expect(context.admissionCalls.at(-1)?.replyRequired).toBe(true)
     context.core.replaceBinding({
       channelId: context.channel.id,
@@ -1588,7 +1675,9 @@ describe('ChannelRuntime M1 lane', () => {
       triggerPolicy: 'observe-only',
     })
     context.setSessionStatus('running')
-    await context.runtime.acceptInbound(inbound(context.connection.id, context.channel.id, 'running-observe-only'))
+    await context.runtime.acceptChannelInbound(
+      inbound(context.connection.id, context.channel.id, 'running-observe-only'),
+    )
     expect([...context.runtimeRepository.admissions.values()]).toHaveLength(2)
     expect([...context.runtimeRepository.admissions.values()][1]).toMatchObject({ mode: 'inject' })
     expect(context.admissionCalls.at(-1)?.replyRequired).toBe(false)
@@ -1598,7 +1687,7 @@ describe('ChannelRuntime M1 lane', () => {
       agentId: context.agent.definition.id,
       triggerPolicy: 'mentioned-or-replied',
     })
-    await context.runtime.acceptInbound({
+    await context.runtime.acceptChannelInbound({
       ...inbound(context.connection.id, context.channel.id, 'running-mention'),
       facts: { mentionedBot: true },
     })
@@ -1609,7 +1698,7 @@ describe('ChannelRuntime M1 lane', () => {
       agentId: context.agent.definition.id,
       triggerPolicy: 'command',
     })
-    await context.runtime.acceptInbound({
+    await context.runtime.acceptChannelInbound({
       ...inbound(context.connection.id, context.channel.id, 'running-command'),
       facts: { command: '/status' },
     })
@@ -1627,7 +1716,7 @@ describe('ChannelRuntime M1 lane', () => {
       observed.push(`${fact.kind}:${fact.sourceId}`)
     })
 
-    await context.runtime.acceptInbound(inbound(context.connection.id, context.channel.id, 'facts-inbound'))
+    await context.runtime.acceptChannelInbound(inbound(context.connection.id, context.channel.id, 'facts-inbound'))
     const episode = [...context.runtimeRepository.episodes.values()][0]!
     await context.runtime.sendMessage({ episodeId: episode.id, parts: [{ type: 'text', text: 'facts-outbound' }] })
     expect(observed.filter((fact) => fact.startsWith('inbound:'))).toHaveLength(2)
@@ -1643,15 +1732,15 @@ describe('ChannelRuntime M1 lane', () => {
   it('rejects an invalid rollover option and allows rollover with idle detection disabled', async () => {
     await expect(setup(true, 0)).rejects.toThrow('idleRolloverMs must be a positive integer or false')
     const context = await setup(true, false)
-    await context.runtime.acceptInbound(inbound(context.connection.id, context.channel.id, 'no-idle-1', 100))
+    await context.runtime.acceptChannelInbound(inbound(context.connection.id, context.channel.id, 'no-idle-1', 100))
     const first = [...context.runtimeRepository.episodes.values()][0]!
-    await context.runtime.acceptInbound(inbound(context.connection.id, context.channel.id, 'no-idle-2', 100_000))
+    await context.runtime.acceptChannelInbound(inbound(context.connection.id, context.channel.id, 'no-idle-2', 100_000))
     expect(context.runtimeRepository.getEpisode(first.id)?.status).toBe('active')
   })
 
   it('recovers pending and claimed Admissions by checking the Session before re-admitting', async () => {
     const pendingContext = await setup()
-    await pendingContext.runtime.acceptInbound(
+    await pendingContext.runtime.acceptChannelInbound(
       inbound(pendingContext.connection.id, pendingContext.channel.id, 'pending'),
     )
     const pendingEpisode = [...pendingContext.runtimeRepository.episodes.values()][0]!
@@ -1679,7 +1768,7 @@ describe('ChannelRuntime M1 lane', () => {
     })
 
     const claimedContext = await setup()
-    await claimedContext.runtime.acceptInbound(
+    await claimedContext.runtime.acceptChannelInbound(
       inbound(claimedContext.connection.id, claimedContext.channel.id, 'claimed'),
     )
     const claimedAdmission = [...claimedContext.runtimeRepository.admissions.values()][0]!
@@ -1695,7 +1784,7 @@ describe('ChannelRuntime M1 lane', () => {
     context.sessionDriver.createSession = () => Promise.reject(new Error('Session unavailable'))
 
     await expect(
-      context.runtime.acceptInbound(inbound(context.connection.id, context.channel.id, 'session-failure')),
+      context.runtime.acceptChannelInbound(inbound(context.connection.id, context.channel.id, 'session-failure')),
     ).rejects.toThrow('Session unavailable')
     const failed = [...context.runtimeRepository.episodes.values()][0]!
     expect(failed).toMatchObject({ status: 'failed' })
@@ -1703,7 +1792,7 @@ describe('ChannelRuntime M1 lane', () => {
 
     context.sessionDriver.createSession = ({ episodeId }) => Promise.resolve(`dsh-${episodeId}`)
     await expect(
-      context.runtime.acceptInbound(inbound(context.connection.id, context.channel.id, 'session-retry')),
+      context.runtime.acceptChannelInbound(inbound(context.connection.id, context.channel.id, 'session-retry')),
     ).resolves.toMatchObject({
       inserted: true,
     })
@@ -1715,7 +1804,7 @@ describe('ChannelRuntime M1 lane', () => {
     context.sessionDriver.admit = () => Promise.reject(new Error('DSH admission failed'))
 
     await expect(
-      context.runtime.acceptInbound(inbound(context.connection.id, context.channel.id, 'admit-failure')),
+      context.runtime.acceptChannelInbound(inbound(context.connection.id, context.channel.id, 'admit-failure')),
     ).rejects.toThrow('DSH admission failed')
     const admission = [...context.runtimeRepository.admissions.values()][0]!
     expect(admission).toMatchObject({ state: 'claimed' })
@@ -1727,7 +1816,7 @@ describe('ChannelRuntime M1 lane', () => {
 
   it('closes the old Episode on binding replacement and creates a clean Episode for the new binding', async () => {
     const context = await setup()
-    await context.runtime.acceptInbound(inbound(context.connection.id, context.channel.id, 'before-replace'))
+    await context.runtime.acceptChannelInbound(inbound(context.connection.id, context.channel.id, 'before-replace'))
     const oldEpisode = [...context.runtimeRepository.episodes.values()][0]!
     const replacement = context.core.createAgent({
       displayName: '小新',
@@ -1747,7 +1836,7 @@ describe('ChannelRuntime M1 lane', () => {
       closeReason: 'binding-replaced',
     })
 
-    await context.runtime.acceptInbound(inbound(context.connection.id, context.channel.id, 'after-replace'))
+    await context.runtime.acceptChannelInbound(inbound(context.connection.id, context.channel.id, 'after-replace'))
     const active = [...context.runtimeRepository.episodes.values()].find(({ status }) => status === 'active')
     expect(active).toMatchObject({ agentId: replacement.definition.id })
     expect(context.runtimeRepository.handoffs).toHaveLength(0)
@@ -1755,7 +1844,9 @@ describe('ChannelRuntime M1 lane', () => {
 
   it('serializes concurrent Binding replacements by Channel and stops the actual previous owner', async () => {
     const context = await setup()
-    await context.runtime.acceptInbound(inbound(context.connection.id, context.channel.id, 'before-concurrent-replace'))
+    await context.runtime.acceptChannelInbound(
+      inbound(context.connection.id, context.channel.id, 'before-concurrent-replace'),
+    )
     const firstEpisode = [...context.runtimeRepository.episodes.values()][0]!
     const second = context.core.createAgent({
       displayName: '第二个智能体',
@@ -1820,7 +1911,7 @@ describe('ChannelRuntime M1 lane', () => {
 
   it('stops an active Episode before clearing a Binding', async () => {
     const context = await setup()
-    await context.runtime.acceptInbound(inbound(context.connection.id, context.channel.id, 'before-clear'))
+    await context.runtime.acceptChannelInbound(inbound(context.connection.id, context.channel.id, 'before-clear'))
     const oldEpisode = [...context.runtimeRepository.episodes.values()][0]!
     await expect(context.runtime.clearBinding(context.channel.id)).resolves.toBeUndefined()
     expect(context.runtimeRepository.getEpisode(oldEpisode.id)).toMatchObject({
@@ -1832,7 +1923,7 @@ describe('ChannelRuntime M1 lane', () => {
 
   it('waits for active Sessions on Adapter Connections to reach an idle checkpoint', async () => {
     const context = await setup()
-    await context.runtime.acceptInbound(inbound(context.connection.id, context.channel.id, 'adapter-safe-wait'))
+    await context.runtime.acceptChannelInbound(inbound(context.connection.id, context.channel.id, 'adapter-safe-wait'))
     let releaseIdle!: () => void
     const idle = new Promise<void>((resolve) => {
       releaseIdle = resolve
@@ -1854,7 +1945,9 @@ describe('ChannelRuntime M1 lane', () => {
 
   it('cancels without handoff before tombstoning a channel', async () => {
     const context = await setup()
-    await context.runtime.acceptInbound(inbound(context.connection.id, context.channel.id, 'before-channel-delete'))
+    await context.runtime.acceptChannelInbound(
+      inbound(context.connection.id, context.channel.id, 'before-channel-delete'),
+    )
     const episode = [...context.runtimeRepository.episodes.values()][0]!
     const event = context.coreRepository.listChannelEvents(context.channel.id, { limit: 1 })[0]!
     const cancellations: string[] = []
@@ -1878,7 +1971,9 @@ describe('ChannelRuntime M1 lane', () => {
 
   it('clears an active context immediately without a handoff and starts clean on the next message', async () => {
     const context = await setup()
-    await context.runtime.acceptInbound(inbound(context.connection.id, context.channel.id, 'before-context-clear'))
+    await context.runtime.acceptChannelInbound(
+      inbound(context.connection.id, context.channel.id, 'before-context-clear'),
+    )
     const episode = [...context.runtimeRepository.episodes.values()][0]!
     const cancellations: string[] = []
     context.sessionDriver.cancelSession = (sessionId, reason) => {
@@ -1895,7 +1990,9 @@ describe('ChannelRuntime M1 lane', () => {
     expect(context.runtimeRepository.handoffs).toHaveLength(0)
     expect([...context.runtimeRepository.episodes.values()]).toHaveLength(1)
 
-    await context.runtime.acceptInbound(inbound(context.connection.id, context.channel.id, 'after-context-clear'))
+    await context.runtime.acceptChannelInbound(
+      inbound(context.connection.id, context.channel.id, 'after-context-clear'),
+    )
     const active = [...context.runtimeRepository.episodes.values()].find(({ status }) => status === 'active')
     expect(active?.id).not.toBe(episode.id)
     expect(context.runtimeRepository.handoffs).toHaveLength(0)
@@ -1909,7 +2006,9 @@ describe('ChannelRuntime M1 lane', () => {
 
   it('compacts an active context after cancellation and falls back deterministically when summary generation fails', async () => {
     const context = await setup(true, undefined, () => Promise.reject(new Error('summary unavailable')))
-    await context.runtime.acceptInbound(inbound(context.connection.id, context.channel.id, 'before-context-compact'))
+    await context.runtime.acceptChannelInbound(
+      inbound(context.connection.id, context.channel.id, 'before-context-compact'),
+    )
     const episode = [...context.runtimeRepository.episodes.values()][0]!
     const cancellations: string[] = []
     context.sessionDriver.cancelSession = (sessionId, reason) => {
@@ -1931,7 +2030,9 @@ describe('ChannelRuntime M1 lane', () => {
 
   it('validates outbound targets and sends every structured part with reply metadata', async () => {
     const context = await setup()
-    await context.runtime.acceptInbound(inbound(context.connection.id, context.channel.id, 'outbound-validation'))
+    await context.runtime.acceptChannelInbound(
+      inbound(context.connection.id, context.channel.id, 'outbound-validation'),
+    )
     const episode = [...context.runtimeRepository.episodes.values()][0]!
 
     await expect(
@@ -1977,9 +2078,9 @@ describe('ChannelRuntime M1 lane', () => {
 
   it('rejects unsupported parts and missing runtime resources before sending', async () => {
     const limited = await setup()
-    await limited.runtime.acceptInbound(inbound(limited.connection.id, limited.channel.id, 'unsupported'))
+    await limited.runtime.acceptChannelInbound(inbound(limited.connection.id, limited.channel.id, 'unsupported'))
     const episode = [...limited.runtimeRepository.episodes.values()][0]!
-    Object.assign(limited.adapter.capabilities, { images: false })
+    Object.assign(limited.adapter.capabilities.outbound, { images: false })
     await expect(
       limited.runtime.sendMessage({
         episodeId: episode.id,
@@ -2014,7 +2115,7 @@ describe('ChannelRuntime M1 lane', () => {
 
   it('checks planner output, adapter context, and over-limit planner results', async () => {
     const context = await setup()
-    await context.runtime.acceptInbound(inbound(context.connection.id, context.channel.id, 'planner'))
+    await context.runtime.acceptChannelInbound(inbound(context.connection.id, context.channel.id, 'planner'))
     const episode = [...context.runtimeRepository.episodes.values()][0]!
     const setPlan = (plans: readonly { readonly parts: readonly object[]; readonly adapterContext?: object }[]) => {
       Object.defineProperty(context.adapter, 'planOutbound', {
@@ -2043,13 +2144,13 @@ describe('ChannelRuntime M1 lane', () => {
     expect(planned.status).toBe('sent')
     expect(context.adapter.deliveries.at(-1)).toMatchObject({ adapterContext: { route: 'special' }, replyTo: 'parent' })
 
-    Object.assign(context.adapter.capabilities, { images: false })
+    Object.assign(context.adapter.capabilities.outbound, { images: false })
     setPlan([{ parts: [{ type: 'image', assetId: AssetIdSchema.parse('ast_planned') }] }])
     await expect(
       context.runtime.sendMessage({ episodeId: episode.id, parts: [{ type: 'text', text: 'unsupported plan' }] }),
     ).rejects.toThrow('planner produced an unsupported part')
 
-    Object.assign(context.adapter.capabilities, { images: true, maxTextLength: 2 })
+    Object.assign(context.adapter.capabilities.outbound, { images: true, maxTextLength: 2 })
     setPlan([{ parts: [{ type: 'text', text: 'too long' }] }])
     await expect(
       context.runtime.sendMessage({ episodeId: episode.id, parts: [{ type: 'text', text: 'short' }] }),
@@ -2058,7 +2159,7 @@ describe('ChannelRuntime M1 lane', () => {
 
   it('records a failed delivery and turns a thrown adapter error into unknown', async () => {
     const failedContext = await setup()
-    await failedContext.runtime.acceptInbound(
+    await failedContext.runtime.acceptChannelInbound(
       inbound(failedContext.connection.id, failedContext.channel.id, 'failed-delivery'),
     )
     const failedEpisode = [...failedContext.runtimeRepository.episodes.values()][0]!
@@ -2068,7 +2169,7 @@ describe('ChannelRuntime M1 lane', () => {
     ).resolves.toMatchObject({ status: 'failed' })
 
     const thrownContext = await setup()
-    await thrownContext.runtime.acceptInbound(
+    await thrownContext.runtime.acceptChannelInbound(
       inbound(thrownContext.connection.id, thrownContext.channel.id, 'thrown-delivery'),
     )
     const thrownEpisode = [...thrownContext.runtimeRepository.episodes.values()][0]!
@@ -2084,7 +2185,9 @@ describe('ChannelRuntime M1 lane', () => {
 
   it('recovers an Episode left opening when rollover Session creation crashes after commit', async () => {
     const context = await setup()
-    await context.runtime.acceptInbound(inbound(context.connection.id, context.channel.id, 'rollover-before-crash'))
+    await context.runtime.acceptChannelInbound(
+      inbound(context.connection.id, context.channel.id, 'rollover-before-crash'),
+    )
     const first = [...context.runtimeRepository.episodes.values()][0]!
     let failHandoffCreation = true
     context.sessionDriver.createSession = (input) => {
@@ -2101,7 +2204,7 @@ describe('ChannelRuntime M1 lane', () => {
     })
 
     await expect(
-      context.runtime.acceptInbound(inbound(context.connection.id, context.channel.id, 'rollover-crash', 103)),
+      context.runtime.acceptChannelInbound(inbound(context.connection.id, context.channel.id, 'rollover-crash', 103)),
     ).rejects.toThrow('new Session crashed')
     const opening = [...context.runtimeRepository.episodes.values()].find(({ status }) => status === 'opening')
     expect(context.runtimeRepository.getEpisode(first.id)).toMatchObject({
@@ -2118,7 +2221,7 @@ describe('ChannelRuntime M1 lane', () => {
 
   it('reports missing rollover anchors instead of fabricating a new Episode', async () => {
     const missingAgent = await setup()
-    await missingAgent.runtime.acceptInbound(
+    await missingAgent.runtime.acceptChannelInbound(
       inbound(missingAgent.connection.id, missingAgent.channel.id, 'missing-agent'),
     )
     const missingAgentEpisode = [...missingAgent.runtimeRepository.episodes.values()][0]!
@@ -2126,7 +2229,7 @@ describe('ChannelRuntime M1 lane', () => {
     await expect(missingAgent.runtime.rolloverEpisode(missingAgentEpisode.id)).rejects.toThrow('agent no longer exists')
 
     const missingRevision = await setup()
-    await missingRevision.runtime.acceptInbound(
+    await missingRevision.runtime.acceptChannelInbound(
       inbound(missingRevision.connection.id, missingRevision.channel.id, 'missing-revision'),
     )
     const missingRevisionEpisode = [...missingRevision.runtimeRepository.episodes.values()][0]!
@@ -2136,7 +2239,7 @@ describe('ChannelRuntime M1 lane', () => {
     )
 
     const missingBinding = await setup()
-    await missingBinding.runtime.acceptInbound(
+    await missingBinding.runtime.acceptChannelInbound(
       inbound(missingBinding.connection.id, missingBinding.channel.id, 'missing-binding'),
     )
     const missingBindingEpisode = [...missingBinding.runtimeRepository.episodes.values()][0]!
@@ -2148,7 +2251,7 @@ describe('ChannelRuntime M1 lane', () => {
 
   it('replays a triggered Channel Event that was persisted before recovery scanning', async () => {
     const context = await setup()
-    await context.runtime.acceptInbound(inbound(context.connection.id, context.channel.id, 'backlog-first'))
+    await context.runtime.acceptChannelInbound(inbound(context.connection.id, context.channel.id, 'backlog-first'))
     context.core.appendInbound(inbound(context.connection.id, context.channel.id, 'backlog-persisted'))
     expect(context.runtimeRepository.admissions).toHaveLength(1)
 

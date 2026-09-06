@@ -6,10 +6,11 @@ import {
   AuthoringTaskIdSchema,
   AssetIdSchema,
   ChannelEventIdSchema,
-  ChannelActivityTypeSchema,
+  AdapterActivityKeySchema,
   ChannelIdSchema,
   ChannelMemberIdSchema,
   ConnectionIdSchema,
+  ConnectionEventIdSchema,
   DshPluginEntryIdSchema,
   DshPluginPackageIdSchema,
   ExtensionIdSchema,
@@ -31,6 +32,7 @@ import {
   AgentClientSlotNameSchema,
   DshNxtHostUiSchema,
   HostPageContributionSchema,
+  HostIconNameSchema,
   HostUiKitComponentNameSchema,
   HostUiPageGeometryEvidenceSchema,
   HostUiPageEntrySchema,
@@ -370,7 +372,7 @@ export const HostSnapshotMessageSchema = z
     parts: z.array(SnapshotMessagePartSchema),
     sender: z.object({ memberId: ChannelMemberIdSchema, displayName: z.string().optional() }).strict().optional(),
     mentionedConnectionAccount: z.boolean().optional(),
-    activityType: ChannelActivityTypeSchema.optional(),
+    activityKey: AdapterActivityKeySchema.optional(),
     targetLogicalMessageId: LogicalMessageIdSchema.optional(),
     occurredAt: z.number().finite(),
     deliveryState: z.enum(['planned', 'sending', 'sent', 'partially-sent', 'failed', 'unknown']).optional(),
@@ -380,11 +382,25 @@ export const HostSnapshotMessageSchema = z
 
 export type HostSnapshotMessage = z.output<typeof HostSnapshotMessageSchema>
 
+export const HostConnectionEventSchema = z
+  .object({
+    id: ConnectionEventIdSchema,
+    connectionId: ConnectionIdSchema,
+    activityKey: AdapterActivityKeySchema,
+    summary: z.string(),
+    actor: z.object({ identityId: PlatformIdentityIdSchema, displayName: z.string().optional() }).strict().optional(),
+    subject: z.object({ identityId: PlatformIdentityIdSchema, displayName: z.string().optional() }).strict().optional(),
+    occurredAt: z.number().int().safe().nonnegative(),
+  })
+  .strict()
+
+export type HostConnectionEvent = z.output<typeof HostConnectionEventSchema>
+
 const PlatformUserChannelPreviewSchema = z
   .object({
     id: ChannelIdSchema,
     displayName: z.string().trim().min(1).max(120).optional(),
-    kind: z.enum(['web', 'direct', 'group']),
+    kind: z.enum(['internal', 'direct', 'group']),
   })
   .strict()
 
@@ -652,9 +668,31 @@ const AdapterConnectionDescriptorSchema = z
     key: NonEmptyStringSchema,
     displayName: z.string(),
     description: z.string(),
-    userCreatable: z.boolean(),
+    provisioning: z.enum(['user-created', 'system-singleton']),
     aliasEditable: z.boolean(),
     channelDiscovery: z.enum(['host-created', 'adapter-observed']),
+    channelKinds: z.array(z.enum(['internal', 'direct', 'group'])).min(1),
+    activities: z.array(
+      z
+        .object({
+          key: AdapterActivityKeySchema,
+          scope: z.enum(['channel', 'connection']),
+          displayName: z.string().trim().min(1),
+          description: z.string().trim().min(1),
+          icon: HostIconNameSchema.optional(),
+          triggerable: z.boolean(),
+          channelKinds: z.array(z.enum(['internal', 'direct', 'group'])).optional(),
+        })
+        .strict(),
+    ),
+    features: z
+      .object({
+        processingFeedback: z
+          .object({ channelKinds: z.array(z.enum(['direct', 'group'])).min(1) })
+          .strict()
+          .optional(),
+      })
+      .strict(),
     diagnostics: z.object({ receive: z.boolean(), send: z.boolean() }).strict(),
     configSchema: z
       .object({
@@ -666,6 +704,15 @@ const AdapterConnectionDescriptorSchema = z
       .strict(),
   })
   .strict()
+
+const AdapterCapabilityStateSchema = z
+  .object({
+    state: z.enum(['available', 'disabled', 'unsupported', 'degraded', 'unknown']),
+    reason: z.string().optional(),
+  })
+  .strict()
+
+const ActivityTriggerOverridesSchema = z.record(AdapterActivityKeySchema, z.boolean())
 
 export const HostSnapshotSchema = z
   .object({
@@ -782,7 +829,7 @@ export const HostSnapshotSchema = z
           id: ChannelIdSchema,
           connectionId: ConnectionIdSchema,
           platformChannelId: NonEmptyStringSchema,
-          kind: z.enum(['web', 'group', 'direct']),
+          kind: z.enum(['internal', 'group', 'direct']),
           displayName: z.string().optional(),
           boundAgentId: AgentIdSchema.optional(),
           runtimePhase: ChannelRuntimePhaseSchema.default('idle'),
@@ -793,7 +840,7 @@ export const HostSnapshotSchema = z
                 agentId: AgentIdSchema,
                 triggerPolicy: TriggerPolicySchema,
                 processingFeedback: z.enum(['auto', 'off']).default('auto'),
-                eventTriggers: z.array(ChannelActivityTypeSchema).default([]),
+                activityTriggerOverrides: ActivityTriggerOverridesSchema.default({}),
                 boundAt: z.number().int().safe().nonnegative(),
               })
               .strict(),
@@ -813,13 +860,14 @@ export const HostSnapshotSchema = z
           id: ConnectionIdSchema,
           adapterKey: NonEmptyStringSchema,
           alias: ConnectionAliasOutputSchema.optional(),
+          activityTriggerDefaults: z.array(AdapterActivityKeySchema).default([]),
           status: z
             .object({
               state: z.enum(['stopped', 'connecting', 'connected', 'reconnecting', 'failed']),
               message: z.string().optional(),
               credentialConfigured: z.boolean(),
               proactiveSend: z.boolean(),
-              accountId: z.string().optional(),
+              accountReference: z.string().optional(),
               implementation: z
                 .object({
                   name: z.string().optional(),
@@ -831,27 +879,15 @@ export const HostSnapshotSchema = z
               optionalCapabilities: z
                 .record(z.string(), z.enum(['unknown', 'available', 'unsupported', 'degraded']))
                 .optional(),
+              activities: z.record(z.string(), AdapterCapabilityStateSchema).default({}),
+              processingFeedback: AdapterCapabilityStateSchema.optional(),
             })
             .strict()
-            .default({ state: 'stopped', credentialConfigured: false, proactiveSend: false }),
-          /** Legacy response fields remain parseable during the client transition; Server no longer emits them. */
-          appId: z.string().optional(),
-          proactiveSend: z.boolean().optional(),
-          credentialConfigured: z.boolean().optional(),
+            .default({ state: 'stopped', credentialConfigured: false, proactiveSend: false, activities: {} }),
           channelCount: z.number().int().nonnegative(),
           knownChannels: z.array(
-            z.object({ id: ChannelIdSchema, name: z.string(), kind: z.enum(['web', 'group', 'direct']) }).strict(),
+            z.object({ id: ChannelIdSchema, name: z.string(), kind: z.enum(['internal', 'group', 'direct']) }).strict(),
           ),
-          gateway: z
-            .object({
-              state: z.enum(['stopped', 'connecting', 'connected', 'reconnecting', 'failed']),
-              sessionId: z.string().optional(),
-              sequence: z.number().int().nonnegative().optional(),
-              resumed: z.boolean().optional(),
-              lastError: z.string().optional(),
-            })
-            .strict()
-            .optional(),
           lastInbound: z
             .object({
               channelId: ChannelIdSchema,
@@ -865,6 +901,19 @@ export const HostSnapshotSchema = z
         })
         .strict(),
     ),
+    archivedConnections: z
+      .array(
+        z
+          .object({
+            id: ConnectionIdSchema,
+            adapterKey: NonEmptyStringSchema,
+            alias: ConnectionAliasOutputSchema.optional(),
+            channelCount: z.number().int().nonnegative(),
+            archivedAt: z.number().int().safe().nonnegative(),
+          })
+          .strict(),
+      )
+      .default([]),
     extensions: z.array(
       z
         .object({
@@ -907,7 +956,7 @@ export const HostSnapshotSchema = z
                     permissionApprovalRequired: z.boolean().optional(),
                     adapter: z
                       .object({
-                        apiVersion: z.literal(1),
+                        apiVersion: z.literal(2),
                         key: NonEmptyStringSchema,
                         descriptorDigest: z.string().regex(/^[a-f0-9]{64}$/u),
                         registered: z.boolean(),
@@ -1245,6 +1294,7 @@ export const DshPluginOperationSseDataSchema = z
 
 export const HostSseEventSchema = z.discriminatedUnion('event', [
   z.object({ event: z.literal('channel-fact'), data: ChannelFactSseDataSchema }).strict(),
+  z.object({ event: z.literal('connection-fact'), data: HostConnectionEventSchema }).strict(),
   z.object({ event: z.literal('runtime'), data: ChannelRuntimeSseDataSchema }).strict(),
   z.object({ event: z.literal('extensions-changed'), data: z.object({ changed: z.literal(true) }).strict() }).strict(),
   z.object({ event: z.literal('dsh-plugins-changed'), data: z.object({ changed: z.literal(true) }).strict() }).strict(),
@@ -1515,6 +1565,21 @@ export const HostApiContracts = {
     response: PlatformUserListResponseSchema,
     error: HostApiErrorSchema,
   }),
+  listConnectionEvents: defineContract({
+    method: 'GET',
+    path: '/api/connections/:connectionId/events',
+    params: z
+      .object({
+        connectionId: ConnectionIdSchema,
+        beforeReceivedAt: z.number().int().safe().nonnegative().optional(),
+        beforeId: ConnectionEventIdSchema.optional(),
+        limit: z.number().int().min(1).max(100).default(50),
+      })
+      .strict(),
+    request: NoRequestBodySchema,
+    response: z.object({ events: z.array(HostConnectionEventSchema), hasMore: z.boolean() }).strict(),
+    error: HostApiErrorSchema,
+  }),
   createAgent: defineContract({
     method: 'POST',
     path: '/api/agents',
@@ -1562,7 +1627,7 @@ export const HostApiContracts = {
       .strict(),
     error: HostApiErrorSchema,
   }),
-  createWebChannel: defineContract({
+  createInternalChannel: defineContract({
     method: 'POST',
     path: '/api/channels',
     params: EmptyParamsSchema,
@@ -1588,7 +1653,7 @@ export const HostApiContracts = {
         channelId: ChannelIdSchema,
         triggerPolicy: TriggerPolicySchema,
         processingFeedback: z.enum(['auto', 'off']).optional(),
-        eventTriggers: z.array(ChannelActivityTypeSchema).optional(),
+        activityTriggerOverrides: ActivityTriggerOverridesSchema.optional(),
       })
       .strict(),
     response: z
@@ -1597,7 +1662,7 @@ export const HostApiContracts = {
         agentId: AgentIdSchema,
         triggerPolicy: TriggerPolicySchema,
         processingFeedback: z.enum(['auto', 'off']).default('auto'),
-        eventTriggers: z.array(ChannelActivityTypeSchema).default([]),
+        activityTriggerOverrides: ActivityTriggerOverridesSchema.default({}),
         boundAt: z.number().int().safe().nonnegative(),
       })
       .strict(),
@@ -1713,6 +1778,30 @@ export const HostApiContracts = {
         alias: ConnectionAliasOutputSchema.optional(),
       })
       .strict(),
+    error: HostApiErrorSchema,
+  }),
+  updateConnectionActivityTriggerDefaults: defineContract({
+    method: 'POST',
+    path: '/api/connections/:connectionId/activity-trigger-defaults',
+    params: connectionParam,
+    request: z.object({ activityKeys: z.array(AdapterActivityKeySchema) }).strict(),
+    response: z.object({ connectionId: ConnectionIdSchema, activityKeys: z.array(AdapterActivityKeySchema) }).strict(),
+    error: HostApiErrorSchema,
+  }),
+  deleteConnection: defineContract({
+    method: 'DELETE',
+    path: '/api/connections/:connectionId',
+    params: connectionParam,
+    request: z.object({ deleteChannelData: z.boolean() }).strict(),
+    response: z.object({ connectionId: ConnectionIdSchema, archived: z.boolean() }).strict(),
+    error: HostApiErrorSchema,
+  }),
+  restoreConnection: defineContract({
+    method: 'POST',
+    path: '/api/connections/:connectionId/restore',
+    params: connectionParam,
+    request: NoRequestBodySchema,
+    response: z.object({ connectionId: ConnectionIdSchema, restored: z.literal(true) }).strict(),
     error: HostApiErrorSchema,
   }),
   dshPlugins: defineContract({

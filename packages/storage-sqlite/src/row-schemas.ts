@@ -8,10 +8,11 @@ import {
   AuthoringTaskIdSchema,
   AssetIdSchema,
   ChannelEventIdSchema,
-  ChannelActivityTypeSchema,
+  AdapterActivityKeySchema,
   ChannelIdSchema,
   ChannelMemberIdSchema,
   ConnectionIdSchema,
+  ConnectionEventIdSchema,
   DshPluginEntryIdSchema,
   DshPluginPackageIdSchema,
   EpisodeHandoffIdSchema,
@@ -56,6 +57,7 @@ import {
   channelMembers,
   channels,
   connectionState,
+  connectionEvents,
   connections,
   dshPluginActivations,
   dshPluginDiagnostics,
@@ -103,11 +105,20 @@ export const ConnectionRowSchema = createSelectSchema(connections, {
   id: ConnectionIdSchema,
   config: JsonValueSchema,
   credentialRefs: credentialRefsSchema,
+  activityTriggerDefaults: z.array(AdapterActivityKeySchema),
   alias: z.string().max(80).nullable(),
 })
 export const ConnectionStateRowSchema = createSelectSchema(connectionState, {
   connectionId: ConnectionIdSchema,
   state: JsonValueSchema,
+})
+export const ConnectionEventRowSchema = createSelectSchema(connectionEvents, {
+  id: ConnectionEventIdSchema,
+  connectionId: ConnectionIdSchema,
+  activityKey: AdapterActivityKeySchema,
+  actorIdentityId: PlatformIdentityIdSchema.nullable(),
+  subjectIdentityId: PlatformIdentityIdSchema.nullable(),
+  facts: jsonObjectSchema.nullable(),
 })
 export const ChannelRowSchema = createSelectSchema(channels, {
   id: ChannelIdSchema,
@@ -126,14 +137,15 @@ export const ChannelMemberRowSchema = createSelectSchema(channelMembers, {
 export const ChannelBindingRowSchema = createSelectSchema(channelBindings, {
   channelId: ChannelIdSchema,
   agentId: AgentIdSchema,
-  eventTriggers: z.array(ChannelActivityTypeSchema),
+  activityTriggerOverridesEnabled: z.array(AdapterActivityKeySchema),
+  activityTriggerSuppressions: z.array(AdapterActivityKeySchema),
 })
 export const ChannelEventRowSchema = createSelectSchema(channelEvents, {
   id: ChannelEventIdSchema,
   logicalMessageId: LogicalMessageIdSchema,
   channelId: ChannelIdSchema,
   senderMemberId: ChannelMemberIdSchema.nullable(),
-  activityType: ChannelActivityTypeSchema.nullable(),
+  activityKey: AdapterActivityKeySchema.nullable(),
   targetLogicalMessageId: LogicalMessageIdSchema.nullable(),
   parts: MessagePartsSchema,
   facts: jsonObjectSchema.nullable(),
@@ -278,6 +290,7 @@ export const CoreRowSchemas = {
   agentCurrentRevisions: AgentCurrentRevisionRowSchema,
   connections: ConnectionRowSchema,
   connectionState: ConnectionStateRowSchema,
+  connectionEvents: ConnectionEventRowSchema,
   channels: ChannelRowSchema,
   platformIdentities: PlatformIdentityRowSchema,
   channelMembers: ChannelMemberRowSchema,

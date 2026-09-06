@@ -294,7 +294,7 @@ export function createOutboxRepository(database: DrizzleCoreDatabase): OutboxSli
         channelId: row.channelId,
         occurredAt: row.receivedAt,
         ...(row.senderMemberId === null ? {} : { senderMemberId: row.senderMemberId }),
-        ...(row.activityType === null ? {} : { activityType: row.activityType }),
+        ...(row.activityKey === null ? {} : { activityKey: row.activityKey }),
         ...(row.targetLogicalMessageId === null ? {} : { targetLogicalMessageId: row.targetLogicalMessageId }),
         parts: row.parts,
         ...(row.facts === null ? {} : { facts: row.facts }),
@@ -318,7 +318,7 @@ export function createOutboxRepository(database: DrizzleCoreDatabase): OutboxSli
             channelId: row.channelId,
             occurredAt: row.receivedAt,
             ...(row.senderMemberId === null ? {} : { senderMemberId: row.senderMemberId }),
-            ...(row.activityType === null ? {} : { activityType: row.activityType }),
+            ...(row.activityKey === null ? {} : { activityKey: row.activityKey }),
             ...(row.targetLogicalMessageId === null ? {} : { targetLogicalMessageId: row.targetLogicalMessageId }),
             parts: row.parts,
             ...(row.facts === null ? {} : { facts: row.facts }),
@@ -383,7 +383,7 @@ export function createOutboxRepository(database: DrizzleCoreDatabase): OutboxSli
                   channelId: row.channelId,
                   occurredAt: row.receivedAt,
                   ...(row.senderMemberId === null ? {} : { senderMemberId: row.senderMemberId }),
-                  ...(row.activityType === null ? {} : { activityType: row.activityType }),
+                  ...(row.activityKey === null ? {} : { activityKey: row.activityKey }),
                   ...(row.targetLogicalMessageId === null
                     ? {}
                     : { targetLogicalMessageId: row.targetLogicalMessageId }),

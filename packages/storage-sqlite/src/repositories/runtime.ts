@@ -92,7 +92,7 @@ const toChannelEvent = (input: typeof channelEvents.$inferSelect): ChannelEventR
     channelId: row.channelId,
     ...(row.platformMessageId === null ? {} : { platformMessageId: row.platformMessageId }),
     kind: row.kind,
-    ...(row.activityType === null ? {} : { activityType: row.activityType }),
+    ...(row.activityKey === null ? {} : { activityKey: row.activityKey }),
     ...(row.targetPlatformMessageId === null ? {} : { targetPlatformMessageId: row.targetPlatformMessageId }),
     ...(row.targetLogicalMessageId === null ? {} : { targetLogicalMessageId: row.targetLogicalMessageId }),
     ...(row.senderMemberId === null ? {} : { senderMemberId: row.senderMemberId }),

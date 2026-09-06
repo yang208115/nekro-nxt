@@ -12,7 +12,7 @@ import { readRequestImageFile } from '@deepseek-ai/dsh-attachment-local'
 import SandboxBashExecutor from '@deepseek-ai/dsh-bash-sandbox'
 import { BasicCompactionEngine } from '@deepseek-ai/dsh-compaction-basic'
 import ToolResultPruner from '@deepseek-ai/dsh-compaction-tool-result-pruner'
-import { Context, type Fiber } from '@deepseek-ai/cordis'
+import { Context, Service, type Fiber } from '@deepseek-ai/cordis'
 import CredentialProvider, {
   credentialRef,
   type CredentialInfo,
@@ -38,11 +38,14 @@ import DynamicCordisRunnerService, {
   type DynamicCordisInventoryRow,
   type DynamicCordisInvokeResult,
   type DynamicCordisPackageInspection,
+  type DynamicCordisPluginInspection,
+  type DynamicCordisReference,
   type DynamicCordisRenderFailure,
   type DynamicCordisResolveAck,
   type DynamicCordisRunRequest,
   type DynamicCordisRunResolution,
   type DynamicCordisRunResponse,
+  type DynamicCordisSnapshotRow,
   type DynamicCordisStopResponse,
   type DynamicCordisUndefineReceipt,
   type HostCordisInspectProviderRegistration,
@@ -72,7 +75,7 @@ import SandboxPolicyService from '@deepseek-ai/dsh-sandbox-policy'
 import { SessionId, SessionStore, type SessionEvent } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import * as SessionStats from '@deepseek-ai/dsh-session-stats'
-import { scopeOf } from '@deepseek-ai/dsh-scope'
+import { bindScopeParent, scopeOf } from '@deepseek-ai/dsh-scope'
 import * as SessionCheckpointPolicy from '@deepseek-ai/dsh-session-checkpoint-policy'
 import { SqliteSessionPersistence } from '@deepseek-ai/dsh-session-persistence-sqlite'
 import { settingsNamespace, type SettingsPathOp } from '@deepseek-ai/dsh-settings'
@@ -210,8 +213,6 @@ export interface AssetAccessRepository {
   canAccessAsset(assetId: AssetRecord['id'], channelId: ChannelId): boolean
   grantAssetAccess(grant: AssetChannelGrant): AssetChannelGrant
 }
-
-export * from './qq-openclaw.js'
 
 export interface AvailableLlmModel {
   readonly provider: string
@@ -767,7 +768,7 @@ export interface SessionChannelContext {
   readonly channelId: ChannelId
   readonly connectionId: ConnectionId
   readonly displayName?: string
-  readonly kind: 'web' | 'direct' | 'group'
+  readonly kind: 'internal' | 'direct' | 'group'
   readonly episodeId: EpisodeId
 }
 
@@ -927,6 +928,7 @@ export const compilePersonaDocument = (input: {
 const jsonObjectSchema = { type: 'object', additionalProperties: true } as const
 
 const EXTENSION_PRIVATE_SERVICE_KEYS = [
+  'agentPresets',
   'agents',
   'attachments',
   'compaction',
@@ -952,6 +954,31 @@ const PERSISTENT_EXTENSION_HOST_SERVICES = new Set(['tools'])
 const isolatePrivateExtensionServices = (context: Context): Context =>
   EXTENSION_PRIVATE_SERVICE_KEYS.reduce((isolated, key) => isolated.isolate(key), context)
 
+declare module '@deepseek-ai/cordis' {
+  interface Context {
+    agentPresets: NekroNxtAgentScopeInheritance
+  }
+}
+
+/** Makes DSH in-process children inherit this Host's exact parent Agent Scope. */
+class NekroNxtAgentScopeInheritance extends Service {
+  constructor(context: Context) {
+    super(context, 'agentPresets')
+  }
+
+  composeFrom(childContext: Context, parentContext: Context): undefined {
+    const child = scopeOf(childContext)
+    const parent = scopeOf(parentContext)
+    if (!child || !parent) throw new Error('Subagent Scope inheritance requires scoped parent and child contexts.')
+    bindScopeParent(child, parent)
+    return undefined
+  }
+
+  composedPreset(): undefined {
+    return undefined
+  }
+}
+
 interface PersistentExtensionContext extends ExtensionHostContext {
   get(service: string): ToolRuntime | undefined
 }
@@ -968,6 +995,7 @@ const nekroNxtInspectProvider = (input: {
   readonly channelId: Parameters<AssetAccessRepository['canAccessAsset']>[1]
   readonly revision: AgentRevisionRecord
   readonly history: Pick<CoreRepository, 'getChannel'>
+  readonly resolveOwner: (agent: Agent) => Agent
 }): HostCordisInspectProviderRegistration => ({
   manifest: {
     id: 'nekro-nxt-runtime',
@@ -1007,7 +1035,8 @@ const nekroNxtInspectProvider = (input: {
     ) {
       throw new TypeError('NekroNxt inspect input must be an object when provided.')
     }
-    if (context.agent.id !== `nxt-${input.episodeId}`) {
+    const owner = input.resolveOwner(context.agent)
+    if (owner.id !== `nxt-${input.episodeId}`) {
       throw new Error('NekroNxt inspect query crossed its owning DSH Session.')
     }
     if (method === 'currentContext') {
@@ -1319,6 +1348,9 @@ class NekroNxtDynamicCordisRunner extends DynamicCordisRunnerService {
     | undefined
   private onAuthoringRun:
     ((pluginId: string, packageId: string, result: DynamicCordisRunResponse) => Promise<void>) | undefined
+  private rootSessionId: SessionId | undefined
+  private ownerResolver: ((agent: Agent) => Agent) | undefined
+  private sessionOwnerResolver: ((sessionId: SessionId) => Agent) | undefined
 
   constructor(context: Context, config: { readonly vmTimeoutMs?: number }) {
     super(context, config)
@@ -1333,6 +1365,26 @@ class NekroNxtDynamicCordisRunner extends DynamicCordisRunnerService {
       consecutiveFailures: 0,
       repeatedFingerprintCount: 0,
     }
+  }
+
+  configureDynamicAuthoringOwner(input: {
+    readonly rootSessionId: SessionId
+    readonly resolveAgent: (agent: Agent) => Agent
+    readonly resolveSession: (sessionId: SessionId) => Agent
+  }): void {
+    if (this.rootSessionId !== undefined && this.rootSessionId !== input.rootSessionId) {
+      throw new Error('Dynamic Runner crossed root Session ownership.')
+    }
+    this.rootSessionId = input.rootSessionId
+    this.ownerResolver = input.resolveAgent
+    this.sessionOwnerResolver = input.resolveSession
+  }
+
+  resolveDynamicAuthoringOwner(agent: Agent): Agent {
+    const rootSessionId = this.requireRootSessionId()
+    if (agent.id === rootSessionId) return agent
+    if (!this.ownerResolver) throw new Error('Dynamic authoring owner resolver is unavailable.')
+    return this.ownerResolver(agent)
   }
 
   configureAuthoringLedger(callbacks: {
@@ -1439,47 +1491,48 @@ class NekroNxtDynamicCordisRunner extends DynamicCordisRunnerService {
   }
 
   override define(request: DynamicCordisDefineRequest): DynamicCordisDefineReceipt {
+    const ownedRequest = this.normalizeDefineRequest(request)
     this.assertWritable('define')
-    preflightNekroNxtDynamicSource(request)
+    preflightNekroNxtDynamicSource(ownedRequest)
     const state = this.requireState()
-    if (request.plugin.kind === 'new' && state.primaryPluginId !== undefined) {
+    if (ownedRequest.plugin.kind === 'new' && state.primaryPluginId !== undefined) {
       throw new Error(`当前 Episode 已拥有 Plugin ${state.primaryPluginId}；修复必须使用 kind:existing。`)
     }
-    if (request.plugin.kind === 'existing' && request.plugin.pluginId !== state.primaryPluginId) {
+    if (ownedRequest.plugin.kind === 'existing' && ownedRequest.plugin.pluginId !== state.primaryPluginId) {
       throw new Error(`只能向当前 Episode 的 Plugin ${state.primaryPluginId ?? '（尚未创建）'} 追加 Package。`)
     }
     try {
       const adapterHost =
         this.definingAuthoringSnapshot?.scope === 'host-adapter'
-          ? request.code.host
-          : this.definingAuthoringSnapshot === undefined && isLegacyAdapterDynamicHostSource(request.code.host)
-            ? request.code.host
+          ? ownedRequest.code.host
+          : this.definingAuthoringSnapshot === undefined && isLegacyAdapterDynamicHostSource(ownedRequest.code.host)
+            ? ownedRequest.code.host
             : undefined
       const receipt = super.define(
         adapterHost === undefined
-          ? request
+          ? ownedRequest
           : {
-              ...request,
-              code: { ...request.code, host: wrapAdapterDynamicHostSource(adapterHost) },
+              ...ownedRequest,
+              code: { ...ownedRequest.code, host: wrapAdapterDynamicHostSource(adapterHost) },
             },
       )
       if (adapterHost !== undefined) {
         this.adapterPackages.add(receipt.packageId)
         this.originalHostByPackage.set(receipt.packageId, adapterHost)
       }
-      if (request.plugin.kind === 'new') this.state = { ...state, primaryPluginId: receipt.pluginId }
+      if (ownedRequest.plugin.kind === 'new') this.state = { ...state, primaryPluginId: receipt.pluginId }
       if (this.onAuthoringDefinition && !this.suppressAuthoringPersistence) {
         const persistDefinition = this.onAuthoringDefinition
         const snapshot = this.definingAuthoringSnapshot ?? {
-          name: request.name,
-          purpose: request.purpose,
+          name: ownedRequest.name,
+          purpose: ownedRequest.purpose,
           scope: adapterHost === undefined ? 'agent' : 'host-adapter',
-          code: request.code,
+          code: ownedRequest.code,
           resources: {},
           permissions: { permissions: [], networkOrigins: [] },
           contributions: [],
         }
-        const persistence = this.authoringPersistenceTail.then(() => persistDefinition(request, receipt, snapshot))
+        const persistence = this.authoringPersistenceTail.then(() => persistDefinition(ownedRequest, receipt, snapshot))
         this.authoringPersistenceTail = persistence.catch(() => undefined)
         this.authoringPersistenceByPackage.set(receipt.packageId, persistence)
         void persistence.catch((error: unknown) => {
@@ -1498,7 +1551,7 @@ class NekroNxtDynamicCordisRunner extends DynamicCordisRunnerService {
     pluginId: CordisDynamicPluginIdType,
     packageId: CordisDynamicPackageIdType,
   ): DynamicCordisPackageInspection {
-    const inspection = super.inspectPackage(agent, pluginId, packageId)
+    const inspection = super.inspectPackage(this.resolveDynamicAuthoringOwner(agent), pluginId, packageId)
     const originalHost = this.originalHostByPackage.get(packageId)
     if (originalHost === undefined) return inspection
     return { ...inspection, code: { ...inspection.code, host: originalHost } }
@@ -1515,18 +1568,19 @@ class NekroNxtDynamicCordisRunner extends DynamicCordisRunnerService {
     mode: CordisDynamicRunMode,
     signal?: AbortSignal,
   ): Promise<DynamicCordisRunResponse> {
+    const owner = this.resolveDynamicAuthoringOwner(agent)
     this.assertWritable('run')
     await this.authoringPersistenceByPackage.get(packageId)
     const tools = this.runtimeContext.get('tools')
     const before =
-      tools instanceof ToolRuntime ? new Set(tools.schemas(scopeOf(agent.ctx)).map(({ name }) => name)) : new Set()
-    const result = await super.run(agent, pluginId, packageId, mode, signal)
+      tools instanceof ToolRuntime ? new Set(tools.schemas(scopeOf(owner.ctx)).map(({ name }) => name)) : new Set()
+    const result = await super.run(owner, pluginId, packageId, mode, signal)
     if (result.ok && result.status === 'running') {
       if (tools instanceof ToolRuntime) {
         this.toolNamesByPackage.set(
           packageId,
           tools
-            .schemas(scopeOf(agent.ctx))
+            .schemas(scopeOf(owner.ctx))
             .map(({ name }) => name)
             .filter((name) => !before.has(name)),
         )
@@ -1646,11 +1700,12 @@ class NekroNxtDynamicCordisRunner extends DynamicCordisRunnerService {
     requestId: ApprovalRequestIdType | null,
     approveFutureVersions: boolean,
   ): Promise<DynamicCordisHostHalfResult> {
+    const owner = this.resolveDynamicAuthoringOwner(agent)
     this.assertWritable('run-host-half')
     const tools = this.runtimeContext.get('tools')
     const before =
-      tools instanceof ToolRuntime ? new Set(tools.schemas(scopeOf(agent.ctx)).map(({ name }) => name)) : new Set()
-    const result = await super.runHostHalf(agent, pluginId, packageId, mode, requestId, approveFutureVersions)
+      tools instanceof ToolRuntime ? new Set(tools.schemas(scopeOf(owner.ctx)).map(({ name }) => name)) : new Set()
+    const result = await super.runHostHalf(owner, pluginId, packageId, mode, requestId, approveFutureVersions)
     if (!result.ok) {
       this.recordFailure('host-half', result.message)
       return result
@@ -1659,7 +1714,7 @@ class NekroNxtDynamicCordisRunner extends DynamicCordisRunnerService {
       this.toolNamesByPackage.set(
         packageId,
         tools
-          .schemas(scopeOf(agent.ctx))
+          .schemas(scopeOf(owner.ctx))
           .map(({ name }) => name)
           .filter((name) => !before.has(name)),
       )
@@ -1668,8 +1723,9 @@ class NekroNxtDynamicCordisRunner extends DynamicCordisRunnerService {
   }
 
   override async undefine(agent: Agent, pluginId: CordisDynamicPluginIdType): Promise<DynamicCordisUndefineReceipt> {
-    const packages = this.snapshot(agent).find((candidate) => candidate.pluginId === pluginId)?.packages ?? []
-    const result = await super.undefine(agent, pluginId)
+    const owner = this.resolveDynamicAuthoringOwner(agent)
+    const packages = this.snapshot(owner).find((candidate) => candidate.pluginId === pluginId)?.packages ?? []
+    const result = await super.undefine(owner, pluginId)
     if (result.ok) {
       for (const pkg of packages) {
         this.toolNamesByPackage.delete(pkg.packageId)
@@ -1689,6 +1745,26 @@ class NekroNxtDynamicCordisRunner extends DynamicCordisRunnerService {
       }
     }
     return result
+  }
+
+  override listPlugins(agent: Agent): DynamicCordisPluginInspection[] {
+    return super.listPlugins(this.resolveDynamicAuthoringOwner(agent))
+  }
+
+  override inspectPlugin(agent: Agent, pluginId: CordisDynamicPluginIdType): DynamicCordisPluginInspection {
+    return super.inspectPlugin(this.resolveDynamicAuthoringOwner(agent), pluginId)
+  }
+
+  override snapshot(agent: Agent): DynamicCordisSnapshotRow[] {
+    return super.snapshot(this.resolveDynamicAuthoringOwner(agent))
+  }
+
+  override reference(agent: Agent, pluginId: CordisDynamicPluginIdType): DynamicCordisReference | undefined {
+    return super.reference(this.resolveDynamicAuthoringOwner(agent), pluginId)
+  }
+
+  override stop(agent: Agent, pluginId: CordisDynamicPluginIdType): Promise<DynamicCordisStopResponse> {
+    return super.stop(this.resolveDynamicAuthoringOwner(agent), pluginId)
   }
 
   private recordFailure(phase: string, message: string): void {
@@ -1730,6 +1806,20 @@ class NekroNxtDynamicCordisRunner extends DynamicCordisRunnerService {
   private requireState(): DynamicAuthoringPolicyState {
     if (!this.state) throw new Error('Dynamic authoring policy is not bound to an Episode.')
     return this.state
+  }
+
+  private requireRootSessionId(): SessionId {
+    if (this.rootSessionId === undefined) throw new Error('Dynamic authoring root Session is not configured.')
+    return this.rootSessionId
+  }
+
+  private normalizeDefineRequest(request: DynamicCordisDefineRequest): DynamicCordisDefineRequest {
+    const rootSessionId = this.requireRootSessionId()
+    if (request.sessionId === rootSessionId) return request
+    if (!this.sessionOwnerResolver) throw new Error('Dynamic authoring Session owner resolver is unavailable.')
+    const owner = this.sessionOwnerResolver(request.sessionId)
+    if (owner.id !== rootSessionId) throw new Error('Dynamic authoring Session resolved to the wrong root owner.')
+    return { ...request, sessionId: rootSessionId }
   }
 }
 
@@ -1948,13 +2038,20 @@ const requireNekroAssetAttachmentStore = (store: AttachmentStore): NekroAssetAtt
   return store
 }
 
-const CHANNEL_MESSAGE_POLICY = `你正在通过 NekroNXT 参与一个真实频道互动。模型生成的普通 text 或 reasoning 只会作为内部运行轨迹保存，并仅在系统后台可见，频道成员完全看不到；只有成功调用 **send_channel_message**，内容才会成为频道中的用户可见发言，请在对话中根据人设给予频道用户积极及时的响应，例如在长工作流程中先调用 **send_channel_message** 说明要做什么，避免用户干等不知道你是否在工作！一次 send_channel_message 不会结束当前 Turn；发送后仍可继续使用其他工具和发送后续消息。send_message 只用于给可继续的子智能体安排后续工作，不会向频道发送内容。
+const ROOT_CHANNEL_MESSAGE_POLICY = `你正在通过 NekroNXT 参与一个真实频道互动。模型生成的普通 text 或 reasoning 只会作为内部运行轨迹保存，并仅在系统后台可见，频道成员完全看不到；只有成功调用 **send_channel_message**，内容才会成为频道中的用户可见发言，请在对话中根据人设给予频道用户积极及时的响应，例如在长工作流程中先调用 **send_channel_message** 说明要做什么，避免用户干等不知道你是否在工作！一次 send_channel_message 不会结束当前 Turn；发送后仍可继续使用其他工具和发送后续消息。send_message 只用于给可继续的子智能体安排后续工作，不会向频道发送内容。
 
 按频道触发策略需要你回应的消息会建立一项回应义务。该义务只能由它之后确认送达的 **send_channel_message**，或显式调用 **finish_channel_turn** 清除；更早的发送不能覆盖后来注入的新请求。任务已经完成且希望立即停止、明确无需发言，或确实无法回应时，必须把 finish_channel_turn 作为最后一个工具调用，并提供真实原因。不要用普通 text/reasoning 冒充已经回复或已经结束。
 
 对于预计需要多步操作、等待外部结果或较长处理时间的请求，通常适合先简短说明你理解的任务和马上要做的事。后续在出现阶段结果、新发现、风险、阻塞或计划变化时再同步。快速回答可以直接发送结果，不必增加没有信息量的寒暄或重复进度。
 
 沟通篇幅和频率应结合当前智能体人设以及频道成员的明确偏好。对方要求安静执行、减少过程消息或只看最终结果时，可以减少或省略过程更新；这不会改变频道的投递方式，任何希望频道成员看到的内容仍需通过 **send_channel_message** 发送。`
+
+const CHILD_CHANNEL_MESSAGE_POLICY = `你是主智能体委派的子智能体，不能直接向当前频道产生用户可见行为，也不负责清除主智能体的频道回应义务。请在普通最终输出中返回完整结果；如果当前工具列表包含 report，可以在有阶段结果、重要发现、风险或阻塞时用它向父级回报。不要把普通 text/reasoning 当成已经向频道发言。`
+
+const ROOT_CONTEXT_MANAGEMENT_POLICY = `上下文管理：当前频道对话、成员关系、用户意图、历史承诺和最终决策优先保留在主上下文。网页搜索、大量历史读取、文件扫描、Shell 操作、扩展开发和反复构建验证等高噪声工作优先委派给 spawn 子智能体；简单问答、低延迟操作或你判断直接执行更合适时，继续使用原工具。委派说明必须自足，不需要复制完整对话，子智能体可以按需查询当前频道历史。相互独立的任务可以在同一轮并行委派；共享同一动态 Runner 或 Plugin 的任务不得并行修改。`
+
+const scopeHasTool = (tools: ToolRuntime, name: string, scope: ReturnType<typeof scopeOf>): boolean =>
+  tools.get(name, scope) !== undefined
 
 const imageContextPolicy = (supportsImage: boolean, hasAuxiliary: boolean): string => {
   if (supportsImage) {
@@ -2154,7 +2251,7 @@ const channelContextTool = (
           channelId: { type: 'string', required: true },
           connectionId: { type: 'string', required: true },
           displayName: { type: 'string' },
-          kind: { type: 'string', enum: ['web', 'direct', 'group'], required: true },
+          kind: { type: 'string', enum: ['internal', 'direct', 'group'], required: true },
           episodeId: { type: 'string', required: true },
         },
       },
@@ -3114,10 +3211,28 @@ async function mountDevelopmentCapabilities(
 
 const CHILD_MAX_TOKENS = 4096
 
+const CHILD_DENIED_TOOL_NAMES = [
+  'send_channel_message',
+  'finish_channel_turn',
+  'retract_channel_message',
+  'nudge_channel_member',
+  'subagent',
+  'send_message',
+  'interrupt_agent',
+  'list_agents',
+] as const
+
+const visibleChildDeniedToolNames = (context: Context, includeSubagent: boolean): string[] => {
+  const visible = new Set(context.tools.schemas(scopeOf(context)).map(({ name }) => name))
+  if (includeSubagent) visible.add('subagent')
+  return CHILD_DENIED_TOOL_NAMES.filter((name) => visible.has(name))
+}
+
 async function mountDelegationCapabilities(agentContext: Context, revision: AgentRevisionRecord): Promise<void> {
   if (!revision.capabilities.subagents) return
   await agentContext.plugin(ToolSubagentControl)
   await agentContext.plugin(ToolSubagentListAgents)
+  const denied = visibleChildDeniedToolNames(agentContext, true)
   await agentContext.plugin(ToolSubagent, {
     provider: 'spawn',
     toolName: 'subagent',
@@ -3125,7 +3240,7 @@ async function mountDelegationCapabilities(agentContext: Context, revision: Agen
     enableRunInBackground: true,
     maxDepth: 1,
     agentOptions: { maxTokens: CHILD_MAX_TOKENS },
-    toolFilter: { allow: [] },
+    toolFilter: { deny: denied },
   })
 }
 
@@ -3317,18 +3432,23 @@ export class DshHostRuntime implements AgentSessionDriver, ExtensionActivationHo
       await context.plugin(ToolRuntime, { mode: 'native' })
       await context.plugin(SkillRegistry)
       await context.plugin(AgentRegistry)
+      await context.plugin(NekroNxtAgentScopeInheritance)
       await context.plugin(SubagentRuntime)
       await context.plugin(SubagentSpawnInProcess, { providerName: 'spawn' })
       await context.plugin(ToolSubagentReport, { reportDelivery: 'next-step' })
       context.effect(
         () =>
           context.subagents.registerContinuableSetup((childContext) => {
-            const dispose = childContext.on('agent/request', async (_payload, next) => ({
+            const denied = visibleChildDeniedToolNames(childContext, false)
+            const disposeRestriction =
+              denied.length === 0 ? () => undefined : childContext.tools.restrict({ deny: denied })
+            const disposeRequestLimit = childContext.on('agent/request', async (_payload, next) => ({
               ...(await next()),
               maxTokens: CHILD_MAX_TOKENS,
             }))
             return () => {
-              dispose()
+              disposeRequestLimit()
+              disposeRestriction()
             }
           }),
         'nekro-nxt: continuable child request limit',
@@ -3960,7 +4080,16 @@ export class DshHostRuntime implements AgentSessionDriver, ExtensionActivationHo
       agentContext.systemPrompt.section({
         name: 'nekro-nxt:channel-communication',
         order: 20,
-        text: CHANNEL_MESSAGE_POLICY,
+        text: (context) =>
+          scopeHasTool(agentContext.tools, 'send_channel_message', context.scope)
+            ? ROOT_CHANNEL_MESSAGE_POLICY
+            : CHILD_CHANNEL_MESSAGE_POLICY,
+      })
+      agentContext.systemPrompt.section({
+        name: 'nekro-nxt:context-management',
+        order: 20.5,
+        text: (context) =>
+          scopeHasTool(agentContext.tools, 'send_channel_message', context.scope) ? ROOT_CONTEXT_MANAGEMENT_POLICY : '',
       })
       agentContext.systemPrompt.section({
         name: 'nekro-nxt:image-context',
@@ -4016,6 +4145,24 @@ export class DshHostRuntime implements AgentSessionDriver, ExtensionActivationHo
           throw new Error('Dynamic Cordis runner did not publish its isolated Service.')
         }
         runner.bindEpisode(input.episodeId)
+        const resolveOwner = (caller: Agent): Agent =>
+          this.#resolveDynamicAuthoringOwner({
+            caller,
+            rootSessionId: sessionId,
+            runner,
+            revision,
+            channelId: input.channelId,
+            episodeId: input.episodeId,
+          })
+        runner.configureDynamicAuthoringOwner({
+          rootSessionId: sessionId,
+          resolveAgent: resolveOwner,
+          resolveSession: (callerSessionId) => {
+            const caller = this.#context.agents.get(callerSessionId)
+            if (!caller) throw new Error(`Dynamic authoring caller Session is not live: ${callerSessionId}`)
+            return resolveOwner(caller)
+          },
+        })
         if (this.#authoring) {
           runner.configureAuthoringLedger({
             definition: async (_request, receipt, snapshot) => {
@@ -4108,6 +4255,7 @@ export class DshHostRuntime implements AgentSessionDriver, ExtensionActivationHo
                 channelId: input.channelId,
                 revision,
                 history: this.#history,
+                resolveOwner: (agent) => runner.resolveDynamicAuthoringOwner(agent),
               }),
             ),
           'nekro-nxt: inspect provider',
@@ -4728,7 +4876,7 @@ export class DshHostRuntime implements AgentSessionDriver, ExtensionActivationHo
       | HostPageContribution
       | {
           readonly kind: 'adapter'
-          readonly apiVersion: 1
+          readonly apiVersion: 2
           readonly key: string
           readonly descriptorDigest: string
         }
@@ -4762,7 +4910,7 @@ export class DshHostRuntime implements AgentSessionDriver, ExtensionActivationHo
         .update(canonicalJson(JsonValueSchema.parse(observed.descriptor)))
         .digest('hex')
       const adapter = {
-        apiVersion: 1 as const,
+        apiVersion: 2 as const,
         key: observed.descriptor.key,
         descriptorDigest,
         registered: true,
@@ -4783,7 +4931,7 @@ export class DshHostRuntime implements AgentSessionDriver, ExtensionActivationHo
         contributions.push({ kind: 'host-client-slot', name: slot.name, key: slot.key })
       }
       contributions.push(...evidence.renderedPages)
-      contributions.push({ kind: 'adapter', apiVersion: 1, key: adapter.key, descriptorDigest })
+      contributions.push({ kind: 'adapter', apiVersion: 2, key: adapter.key, descriptorDigest })
       return {
         ...evidence,
         renderedHostSlots,
@@ -5495,6 +5643,43 @@ export class DshHostRuntime implements AgentSessionDriver, ExtensionActivationHo
       throw new Error('Dynamic creation is not granted to this Agent Revision.')
     }
     return { agent, ...owned }
+  }
+
+  #resolveDynamicAuthoringOwner(input: {
+    readonly caller: Agent
+    readonly rootSessionId: SessionId
+    readonly runner: NekroNxtDynamicCordisRunner
+    readonly revision: AgentRevisionRecord
+    readonly channelId: ChannelId
+    readonly episodeId: EpisodeId
+  }): Agent {
+    const { caller, rootSessionId, runner, revision, channelId, episodeId } = input
+    if (this.#context.agents.get(caller.id) !== caller) {
+      throw new Error('Dynamic authoring caller Agent is stale or offline.')
+    }
+    const header = caller.session.header
+    if (header.origin !== 'subagent' || header.delegationDepth !== 1 || header.parentSession !== rootSessionId) {
+      throw new Error('Dynamic authoring is only available to a direct child of the owning root Session.')
+    }
+    const owner = this.#context.agents.get(rootSessionId)
+    if (!owner || this.#handles.get(rootSessionId)?.agent !== owner) {
+      throw new Error('Dynamic authoring root Session is stale or offline.')
+    }
+    if (this.#dynamicSessions.get(rootSessionId)?.runner !== runner) {
+      throw new Error('Dynamic authoring Runner is not owned by the expected root Session.')
+    }
+    const mappedRevision = this.#revisionBySession.get(rootSessionId)
+    if (
+      this.#productAgentBySession.get(rootSessionId) !== revision.agentId ||
+      this.#channelBySession.get(rootSessionId) !== channelId ||
+      this.#episodeBySession.get(rootSessionId) !== episodeId ||
+      mappedRevision?.id !== revision.id ||
+      mappedRevision.agentId !== revision.agentId ||
+      mappedRevision.capabilities.dynamicCreation !== true
+    ) {
+      throw new Error('Dynamic authoring root Session ownership no longer matches its immutable Revision.')
+    }
+    return owner
   }
 
   async #mountPersistentExtensionsIntoSession(

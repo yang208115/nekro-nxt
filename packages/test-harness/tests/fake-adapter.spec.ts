@@ -1,4 +1,8 @@
-import type { AdapterInboundEvent, AdapterConnectionContext, PhysicalDeliveryRequest } from '@nekro-nxt/adapter-sdk'
+import type {
+  AdapterChannelInboundEvent,
+  AdapterConnectionContext,
+  PhysicalDeliveryRequest,
+} from '@nekro-nxt/adapter-sdk'
 import {
   AssetIdSchema,
   ChannelEventIdSchema,
@@ -21,7 +25,7 @@ import {
 const connectionId = ConnectionIdSchema.parse('con_test')
 const channelId = ChannelIdSchema.parse('chn_test')
 
-const inbound = (id: number): AdapterInboundEvent => ({
+const inbound = (id: number): AdapterChannelInboundEvent => ({
   connectionId,
   channelId,
   adapterKey: 'fake',
@@ -48,7 +52,7 @@ describe('FakeAdapterConnection', () => {
     const context: AdapterConnectionContext = {
       connectionId,
       now: () => 0,
-      acceptInbound: (event) => {
+      acceptChannelInbound: (event) => {
         accepted.push(event.dedupeKey)
         return Promise.resolve({
           channelEventId: ChannelEventIdSchema.parse(`evt_${accepted.length}`),
@@ -96,7 +100,7 @@ describe('FakeAdapterConnection', () => {
     const context: AdapterConnectionContext = {
       connectionId,
       now: () => 0,
-      acceptInbound: () =>
+      acceptChannelInbound: () =>
         Promise.resolve({ channelEventId: ChannelEventIdSchema.parse('evt_lifecycle'), inserted: true }),
     }
     const adapter = new FakeAdapterConnection(context, {
@@ -200,7 +204,7 @@ describe('Fake Adapter transport and Host context', () => {
       await harness.context.members.resolvePlatformUserId(channelId, ChannelMemberIdSchema.parse('mbr_unknown')),
     ).toBeUndefined()
 
-    const committed = await harness.context.acceptInbound({
+    const committed = await harness.context.acceptChannelInbound({
       ...inbound(3),
       connectionId: harness.context.connectionId,
       channelId,

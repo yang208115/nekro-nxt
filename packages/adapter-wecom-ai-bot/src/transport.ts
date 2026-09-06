@@ -363,7 +363,7 @@ export class WeComWebSocketClient {
     this.#context.diagnostics.publish({
       status,
       ...(message ? { message } : {}),
-      accountId: this.#botId,
+      accountReference: this.#botId,
       implementation: { name: '企业微信智能机器人长连接', protocolVersion: 'official-websocket' },
       ...(details ? { details } : {}),
     })

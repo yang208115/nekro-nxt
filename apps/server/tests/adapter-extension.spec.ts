@@ -43,9 +43,12 @@ const descriptor = {
   key: 'synthetic-chat',
   displayName: '合成聊天平台',
   description: '只用于离线适配器闭环测试。',
-  userCreatable: true,
+  provisioning: 'user-created',
   aliasEditable: true,
   channelDiscovery: 'adapter-observed',
+  channelKinds: ['group'],
+  activities: [],
+  features: {},
   diagnostics: { receive: true, send: true },
   configSchema: {
     schemaVersion: 1,
@@ -55,7 +58,7 @@ const descriptor = {
   }
 }
 harness.registerAdapter({
-  apiVersion: 1,
+  apiVersion: 2,
   descriptor,
   async create(context, stored) {
     let running = false
@@ -63,15 +66,18 @@ harness.registerAdapter({
     const failFirstStop = stored.configuration.failFirstStop === true
     return {
       capabilities: {
-        text: true, mentions: false, images: false, files: false, audio: false,
-        replies: false, mixedContent: false, proactiveSend: true
+        outbound: {
+          text: true, mentions: false, images: false, files: false, audio: false,
+          replies: false, mixedContent: false, proactiveSend: true
+        },
+        activities: {}
       },
       async start() {
         running = true
         const channelId = await context.channels.ensure({
           platformChannelId: 'synthetic-room', kind: 'group', displayName: '合成频道', observedAt: context.now()
         })
-        await context.acceptInbound({
+        await context.acceptChannelInbound({
           connectionId: context.connectionId,
           channelId,
           adapterKey: descriptor.key,
@@ -125,13 +131,13 @@ describe('Host Adapter Extension end-to-end', () => {
       },
     })
     await runtime.start()
-    const entity = await runtime.createAgentWithWebChannel({
+    const entity = await runtime.createAgentWithInternalChannel({
       displayName: '适配器创造智能体',
       persona: '',
       model: { provider: 'test-provider', model: 'chat-model' },
       capabilities: { dynamicCreation: true },
     })
-    await runtime.web.postMessage({
+    await runtime.internalChannel.postMessage({
       channelId: entity.channelId,
       clientEventId: 'adapter-seed',
       parts: [{ type: 'text', text: '创建合成适配器。' }],

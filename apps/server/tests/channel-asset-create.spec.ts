@@ -1,4 +1,4 @@
-import { createWebAdapterConnection } from '@nekro-nxt/adapter-web'
+import { createFakeLocalChannelConnection } from '@nekro-nxt/test-harness'
 import { ChannelRuntime, type AgentSessionDriver } from '@nekro-nxt/channel-runtime'
 import { AssetService, CoreService } from '@nekro-nxt/core'
 import { AssetIdSchema, EpisodeIdSchema } from '@nekro-nxt/contracts'
@@ -27,16 +27,16 @@ const createFixture = async () => {
   const repository = new SqliteCoreRepository(database)
   let sequence = 0
   const core = new CoreService(repository, { now: () => 100, nextUlid: () => `A${++sequence}` })
-  const connection = core.createConnection({ adapterKey: 'web', config: {} })
+  const connection = core.createConnection({ adapterKey: 'fixture-alpha', config: {} })
   const currentChannel = core.createChannel({
     connectionId: connection.id,
     platformChannelId: 'current',
-    kind: 'web',
+    kind: 'internal',
   })
   const otherChannel = core.createChannel({
     connectionId: connection.id,
     platformChannelId: 'other',
-    kind: 'web',
+    kind: 'internal',
   })
   const assetService = new AssetService(repository, path.join(directory, 'assets'), {
     now: () => 200,
@@ -149,7 +149,7 @@ describe('model-created channel Assets', () => {
     const opened = fixture.core.appendInbound({
       connectionId: fixture.connection.id,
       channelId: fixture.currentChannel.id,
-      adapterKey: 'web',
+      adapterKey: 'fixture-alpha',
       kind: 'control',
       parts: [],
       platformTimestamp: 400,
@@ -169,7 +169,7 @@ describe('model-created channel Assets', () => {
     fixture.repository.activateEpisode(episodeId, 'dsh-asset-test')
 
     const runtimeRef: { current?: ChannelRuntime } = {}
-    const web = createWebAdapterConnection(
+    const web = createFakeLocalChannelConnection(
       fixture.connection.id,
       () => {
         if (!runtimeRef.current) return Promise.reject(new Error('Channel Runtime is not ready.'))

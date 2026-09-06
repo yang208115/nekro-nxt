@@ -4,6 +4,7 @@ import type {
   ChannelRuntimeView,
   ChannelSummary,
   ConnectionSummary,
+  ArchivedConnectionSummary,
   ConversationMessage,
   DynamicApproval,
   LocalExtensionSummary,
@@ -25,6 +26,7 @@ export interface ProductSnapshot {
   readonly messages: readonly ConversationMessage[]
   readonly channelRuntimes: Readonly<Record<string, ChannelRuntimeView>>
   readonly connections: readonly ConnectionSummary[]
+  readonly archivedConnections: readonly ArchivedConnectionSummary[]
   readonly extensions: readonly LocalExtensionSummary[]
   readonly hostUi?: ProductState['hostUi']
   readonly platformUsersRevision: number
@@ -144,6 +146,7 @@ export class ProductHostCoordinator implements ProductHostPort {
         messages: snapshot.messages,
         channelRuntimes: snapshot.channelRuntimes,
         connections: snapshot.connections,
+        archivedConnections: snapshot.archivedConnections,
         extensions: snapshot.extensions,
         hostUi: snapshot.hostUi ?? { preferencesRevision: 0, pages: [] },
         platformUsersRevision: snapshot.platformUsersRevision,

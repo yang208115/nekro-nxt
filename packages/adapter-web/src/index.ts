@@ -2,7 +2,7 @@ import type {
   AdapterConnectionContext,
   AdapterConnectionRuntime,
   AdapterDeliveryReceipt,
-  AdapterHostContributionV1,
+  AdapterHostContributionV2,
   AdapterOutboundCapabilities,
   InboundCommitResult,
   PhysicalDeliveryRequest,
@@ -16,9 +16,12 @@ export const WEB_CONNECTION_DEFINITION = defineAdapterConnection({
   key: WEB_ADAPTER_KEY,
   displayName: '内置频道',
   description: '由 NekroNXT 直接提供，用于应用内对话。',
-  userCreatable: false,
+  provisioning: 'system-singleton',
   aliasEditable: false,
   channelDiscovery: 'host-created',
+  channelKinds: ['internal'],
+  activities: [],
+  features: {},
   diagnostics: { receive: false, send: false },
   configurationSchema: AdapterEmptyObjectSchema,
   credentialsSchema: AdapterEmptyObjectSchema,
@@ -28,11 +31,11 @@ export const WEB_CONNECTION_DEFINITION = defineAdapterConnection({
 
 export const WEB_CONNECTION_DESCRIPTOR = WEB_CONNECTION_DEFINITION.descriptor
 
-export const WEB_HOST_CONTRIBUTION: AdapterHostContributionV1 = {
-  apiVersion: 1,
+export const WEB_HOST_CONTRIBUTION: AdapterHostContributionV2 = {
+  apiVersion: 2,
   descriptor: WEB_CONNECTION_DEFINITION.descriptor,
   create: (context) =>
-    Promise.resolve(createWebAdapterConnection(context.connectionId, context.acceptInbound, context.now)),
+    Promise.resolve(createWebAdapterConnection(context.connectionId, context.acceptChannelInbound, context.now)),
 }
 
 export const WEB_ADAPTER_CAPABILITIES: AdapterOutboundCapabilities = {
@@ -61,11 +64,12 @@ export interface WebOutboundEvent {
 }
 
 export type WebOutboundListener = (event: WebOutboundEvent) => Promise<void> | void
-type WebAdapterContext = Pick<AdapterConnectionContext, 'connectionId' | 'acceptInbound' | 'now'>
+type WebAdapterContext = Pick<AdapterConnectionContext, 'connectionId' | 'acceptChannelInbound' | 'now'>
 
 /** In-process platform boundary for Web Channel; durable truth remains in Core Outbox. */
 export class WebAdapterConnection implements AdapterConnectionRuntime {
-  readonly capabilities = WEB_ADAPTER_CAPABILITIES
+  readonly capabilities = { outbound: WEB_ADAPTER_CAPABILITIES, activities: {} }
+  readonly localChannel = { postMessage: (input: WebInboundMessage) => this.postMessage(input) }
   readonly #context: WebAdapterContext
   readonly #listeners = new Set<WebOutboundListener>()
   #running = false
@@ -97,7 +101,7 @@ export class WebAdapterConnection implements AdapterConnectionRuntime {
     if (message.clientEventId.trim().length === 0)
       return Promise.reject(new Error('Web clientEventId must not be empty.'))
     const receivedAt = message.receivedAt ?? this.#context.now()
-    return this.#context.acceptInbound({
+    return this.#context.acceptChannelInbound({
       connectionId: this.#context.connectionId,
       channelId: message.channelId,
       adapterKey: WEB_ADAPTER_KEY,
@@ -131,6 +135,6 @@ export class WebAdapterConnection implements AdapterConnectionRuntime {
 
 export const createWebAdapterConnection = (
   connectionId: ConnectionId,
-  acceptInbound: AdapterConnectionContext['acceptInbound'],
+  acceptChannelInbound: AdapterConnectionContext['acceptChannelInbound'],
   now: () => number = Date.now,
-): WebAdapterConnection => new WebAdapterConnection({ connectionId, acceptInbound, now })
+): WebAdapterConnection => new WebAdapterConnection({ connectionId, acceptChannelInbound, now })

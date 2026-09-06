@@ -1,7 +1,7 @@
 import type {
   AdapterConnectionDiagnostic,
   AdapterConnectionHostContext,
-  AdapterInboundEvent,
+  AdapterChannelInboundEvent,
 } from '@nekro-nxt/adapter-sdk'
 import {
   AssetIdSchema,
@@ -9,7 +9,9 @@ import {
   ChannelIdSchema,
   ChannelMemberIdSchema,
   ConnectionIdSchema,
+  ConnectionEventIdSchema,
   LogicalMessageIdSchema,
+  PlatformIdentityIdSchema,
   type JsonValue,
 } from '@nekro-nxt/contracts'
 import { FakeAdapterTransport } from '@nekro-nxt/test-harness'
@@ -23,7 +25,7 @@ export const waitFor = async (predicate: () => boolean, timeoutMs = 3_000): Prom
 }
 
 export const createFakeContext = () => {
-  const events: AdapterInboundEvent[] = []
+  const events: AdapterChannelInboundEvent[] = []
   const diagnostics: AdapterConnectionDiagnostic[] = []
   const states = new Map<string, JsonValue>()
   const channels = new Map<string, ReturnType<typeof ChannelIdSchema.parse>>()
@@ -35,10 +37,12 @@ export const createFakeContext = () => {
   const context: AdapterConnectionHostContext = {
     connectionId: ConnectionIdSchema.parse('con_WECOMTEST'),
     now: () => Date.now(),
-    acceptInbound: (event) => {
+    acceptChannelInbound: (event) => {
       events.push(event)
       return Promise.resolve({ channelEventId: ChannelEventIdSchema.parse(`evt_${events.length}`), inserted: true })
     },
+    acceptConnectionInbound: () =>
+      Promise.resolve({ connectionEventId: ConnectionEventIdSchema.parse('cev_WECOM1'), inserted: true }),
     channels: {
       ensure: ({ platformChannelId }) => {
         const current = channels.get(platformChannelId)
@@ -54,6 +58,9 @@ export const createFakeContext = () => {
         const platform = [...channels].find(([, candidate]) => candidate === channelId)?.[0]
         return Promise.resolve(platform?.startsWith('group:') ? 'group' : platform ? 'direct' : undefined)
       },
+    },
+    identities: {
+      ensure: () => Promise.resolve(PlatformIdentityIdSchema.parse('pid_WECOM1')),
     },
     members: {
       ensure: ({ channelId, platformUserId }) => {

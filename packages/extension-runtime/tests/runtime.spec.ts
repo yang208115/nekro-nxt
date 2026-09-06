@@ -2027,7 +2027,7 @@ const adapterVerification = (id: ExtensionRevisionId, key = 'synthetic-adapter')
   rpcMethods: [],
   renderedSlots: [],
   adapter: {
-    apiVersion: 1,
+    apiVersion: 2,
     key,
     descriptorDigest: 'a'.repeat(64),
     registered: true,

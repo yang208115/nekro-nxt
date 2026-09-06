@@ -1,4 +1,4 @@
-import type { AdapterInboundEvent } from '@nekro-nxt/adapter-sdk'
+import type { AdapterChannelInboundEvent } from '@nekro-nxt/adapter-sdk'
 import {
   AssetIdSchema,
   ChannelEventIdSchema,
@@ -40,7 +40,7 @@ const socketFrom = (payloads: readonly unknown[]): QQGatewaySocket => ({
 describe('QQ OpenClaw composed runtime', () => {
   it('decodes Gateway media, commits the Channel fact, saves resume state and stops quiescently', async () => {
     let resumeState: QQGatewayCheckpoint | undefined
-    let accepted: AdapterInboundEvent | undefined
+    let accepted: AdapterChannelInboundEvent | undefined
     let resolveAccepted: (() => void) | undefined
     const acceptedPromise = new Promise<void>((resolve) => {
       resolveAccepted = resolve
@@ -60,7 +60,7 @@ describe('QQ OpenClaw composed runtime', () => {
       context: {
         connectionId,
         now: () => 1_000,
-        acceptInbound: (event) => {
+        acceptChannelInbound: (event) => {
           accepted = event
           resolveAccepted?.()
           return Promise.resolve({

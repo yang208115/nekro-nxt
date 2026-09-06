@@ -5,7 +5,7 @@ import {
   parseJsonValue,
   type HostApiRequest,
   type HostApiResponse,
-  type ChannelActivityType,
+  type AdapterActivityKey,
   type HostUiPermissionDeclaration,
   type PromptDocumentV1,
 } from '@nekro-nxt/contracts'
@@ -113,7 +113,7 @@ export interface ChannelSummary {
   readonly id: string
   readonly connectionId: string
   readonly name: string
-  readonly kind: 'web' | 'qq-group' | 'qq-direct'
+  readonly kind: 'internal' | 'group' | 'direct'
   readonly connectionName: string
   readonly agentId: string
   readonly trigger: string
@@ -123,7 +123,7 @@ export interface ChannelSummary {
     readonly agentId: string
     readonly triggerPolicy: 'always' | 'mentioned-or-replied' | 'command' | 'observe-only'
     readonly processingFeedback: 'auto' | 'off'
-    readonly eventTriggers: HostApiResponse<'snapshot'>['channels'][number]['bindings'][number]['eventTriggers']
+    readonly activityTriggerOverrides: HostApiResponse<'snapshot'>['channels'][number]['bindings'][number]['activityTriggerOverrides']
   }[]
   readonly unread: number
 }
@@ -190,7 +190,7 @@ export interface ConversationMessage {
   readonly channelId: string
   readonly author: string
   readonly role: 'member' | 'agent' | 'system'
-  readonly activityType?: ChannelActivityType
+  readonly activityKey?: AdapterActivityKey
   readonly body: string
   readonly parts: readonly ConversationPart[]
   readonly mentionedConnectionAccount: boolean
@@ -219,21 +219,37 @@ export interface ConnectionSummary {
   /** Optional user-facing name; the Adapter name remains the platform identity. */
   readonly alias?: string
   readonly name: string
-  /** User-facing Adapter name. The stable key remains available only for internal branching. */
+  /** User-facing Adapter name. The opaque key only joins Descriptor, Runtime, and Slot projections. */
   readonly adapter: string
   readonly adapterKey: string
   readonly userManaged: boolean
   readonly state: ConnectionState
-  readonly appId: string
+  readonly accountReference: string
   readonly credentialConfigured: boolean
-  readonly gatewayState: string
+  readonly runtimeState: string
   readonly lastError: string
   readonly proactiveSend: boolean
+  readonly activityCapabilities: HostApiResponse<'snapshot'>['connections'][number]['status']['activities']
+  readonly activityTriggerDefaults: HostApiResponse<'snapshot'>['connections'][number]['activityTriggerDefaults']
+  readonly processingFeedbackCapability?: HostApiResponse<'snapshot'>['connections'][number]['status']['processingFeedback']
   readonly channels: number
   readonly knownChannels: readonly { readonly id: string; readonly name: string; readonly kind: string }[]
   readonly lastEvent: string
   readonly receiveTest: string
   readonly sendTest: string
+  readonly events: HostApiResponse<'listConnectionEvents'>['events']
+  readonly eventsLoaded: boolean
+  readonly eventsLoading: boolean
+  readonly eventsHasMore: boolean
+}
+
+export interface ArchivedConnectionSummary {
+  readonly id: string
+  readonly adapterKey: string
+  readonly alias?: string
+  readonly adapter: string
+  readonly channelCount: number
+  readonly archivedAt: number
 }
 
 export interface LocalExtensionSummary {
@@ -402,6 +418,7 @@ export interface ProductState {
   readonly channelHistory: Readonly<Record<string, ChannelHistoryState>>
   readonly channelRuntimes: Readonly<Record<string, ChannelRuntimeView>>
   readonly connections: readonly ConnectionSummary[]
+  readonly archivedConnections: readonly ArchivedConnectionSummary[]
   readonly extensions: readonly LocalExtensionSummary[]
   readonly hostUi: HostApiResponse<'snapshot'>['hostUi']
   readonly platformUserFacets: HostApiResponse<'listPlatformUsers'>['facets']
@@ -451,18 +468,21 @@ export interface ProductState {
     readonly alias?: string
   }): Promise<void>
   updateConnectionAlias(connectionId: string, alias: string): Promise<void>
+  updateConnectionActivityTriggerDefaults(connectionId: string, activityKeys: readonly string[]): Promise<void>
+  deleteConnection(connectionId: string, deleteChannelData: boolean): Promise<void>
+  restoreConnection(connectionId: string): Promise<void>
   workTreeOrder: {
     readonly agentIds: readonly string[]
     readonly channelIdsByAgent: Readonly<Record<string, readonly string[]>>
     readonly unboundChannelIds: readonly string[]
   }
-  createWebChannel(input: { readonly displayName: string }): Promise<{ readonly channelId: string }>
+  createInternalChannel(input: { readonly displayName: string }): Promise<{ readonly channelId: string }>
   createBinding(input: {
     readonly agentId: string
     readonly channelId: string
     readonly triggerPolicy: 'always' | 'mentioned-or-replied' | 'command' | 'observe-only'
     readonly processingFeedback?: 'auto' | 'off'
-    readonly eventTriggers?: HostApiResponse<'snapshot'>['channels'][number]['bindings'][number]['eventTriggers']
+    readonly activityTriggerOverrides?: HostApiResponse<'snapshot'>['channels'][number]['bindings'][number]['activityTriggerOverrides']
   }): Promise<void>
   clearBinding(channelId: string): Promise<void>
   deleteChannel(channelId: string, expectedBoundAgentId: string | null): Promise<void>
@@ -475,6 +495,7 @@ export interface ProductState {
   setCapability(agentId: string, capability: keyof AgentSummary['capabilities'], enabled: boolean): Promise<void>
   setCapabilities(agentId: string, capabilities: Partial<AgentSummary['capabilities']>): Promise<void>
   runConnectionTest(id: string, direction: 'receive' | 'send', channelId?: string): Promise<void>
+  loadConnectionEvents(connectionId: string, older?: boolean): Promise<void>
   resolveApproval(input: { requestId: string; agentId: string; approved: boolean }): Promise<void>
   stopAuthoringTask(taskId: string, expectedRevision: number): Promise<void>
   deleteAuthoringTask(taskId: string): Promise<void>
@@ -576,6 +597,7 @@ export const useProductStore = create<ProductState>((set) => ({
   channelHistory: {},
   channelRuntimes: {},
   connections: [],
+  archivedConnections: [],
   extensions: [],
   hostUi: { preferencesRevision: 0, pages: [] },
   platformUserFacets: { adapters: [], connections: [] },
@@ -672,8 +694,25 @@ export const useProductStore = create<ProductState>((set) => ({
       alias: alias.trim(),
     })
   },
-  createWebChannel: async ({ displayName }) => {
-    const result = await requireHost().execute('channels.createWeb', {
+  updateConnectionActivityTriggerDefaults: async (connectionId, activityKeys) => {
+    await requireHost().execute('connections.updateActivityTriggerDefaults', {
+      connectionId: requireValue(connectionId, '缺少连接标识，请刷新页面后重试。'),
+      activityKeys,
+    })
+  },
+  deleteConnection: async (connectionId, deleteChannelData) => {
+    await requireHost().execute('connections.delete', {
+      connectionId: requireValue(connectionId, '缺少连接标识，请刷新页面后重试。'),
+      deleteChannelData,
+    })
+  },
+  restoreConnection: async (connectionId) => {
+    await requireHost().execute('connections.restore', {
+      connectionId: requireValue(connectionId, '缺少连接标识，请刷新页面后重试。'),
+    })
+  },
+  createInternalChannel: async ({ displayName }) => {
+    const result = await requireHost().execute('channels.createInternal', {
       displayName: requireValue(displayName, '请输入频道名称。'),
     })
     if (!isRecord(result) || typeof result['channelId'] !== 'string') {
@@ -681,13 +720,13 @@ export const useProductStore = create<ProductState>((set) => ({
     }
     return { channelId: result['channelId'] }
   },
-  createBinding: async ({ agentId, channelId, triggerPolicy, processingFeedback, eventTriggers }) => {
+  createBinding: async ({ agentId, channelId, triggerPolicy, processingFeedback, activityTriggerOverrides }) => {
     await requireHost().execute('bindings.create', {
       agentId: requireValue(agentId, '缺少智能体标识，请刷新页面后重试。'),
       channelId: requireValue(channelId, '请选择要绑定的频道。'),
       triggerPolicy,
       ...(processingFeedback === undefined ? {} : { processingFeedback }),
-      ...(eventTriggers === undefined ? {} : { eventTriggers }),
+      ...(activityTriggerOverrides === undefined ? {} : { activityTriggerOverrides }),
     })
   },
   clearBinding: async (channelId) => {
@@ -829,6 +868,46 @@ export const useProductStore = create<ProductState>((set) => ({
       direction,
       ...(channelId === undefined ? {} : { channelId }),
     })
+  },
+  loadConnectionEvents: async (connectionId, older = false) => {
+    const id = requireValue(connectionId, '缺少连接标识，请刷新页面后重试。')
+    const current = useProductStore.getState().connections.find((connection) => connection.id === id)
+    if (!current || current.eventsLoading || (older && !current.eventsHasMore)) return
+    useProductStore.setState((state) => ({
+      connections: state.connections.map((connection) =>
+        connection.id === id ? { ...connection, eventsLoading: true } : connection,
+      ),
+    }))
+    try {
+      const oldest = older ? current.events.at(-1) : undefined
+      const result = HostApiContracts.listConnectionEvents.parseResponse(
+        await requireHost().execute('connections.listEvents', {
+          connectionId: id,
+          limit: 30,
+          ...(oldest === undefined ? {} : { beforeReceivedAt: oldest.occurredAt, beforeId: oldest.id }),
+        }),
+      )
+      useProductStore.setState((state) => ({
+        connections: state.connections.map((connection) => {
+          if (connection.id !== id) return connection
+          const combined = older ? [...connection.events, ...result.events] : result.events
+          return {
+            ...connection,
+            events: [...new Map(combined.map((event) => [event.id, event])).values()],
+            eventsLoaded: true,
+            eventsLoading: false,
+            eventsHasMore: result.hasMore,
+          }
+        }),
+      }))
+    } catch (error) {
+      useProductStore.setState((state) => ({
+        connections: state.connections.map((connection) =>
+          connection.id === id ? { ...connection, eventsLoading: false } : connection,
+        ),
+      }))
+      throw error
+    }
   },
   resolveApproval: async ({ requestId, agentId, approved }) => {
     const normalizedRequestId = requireValue(requestId, '缺少批准请求，请刷新页面后重试。')

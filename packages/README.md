@@ -3,7 +3,8 @@
 当前只保留已有验证消费者的包：
 
 - [`contracts`](contracts/README.md)：跨持久与进程边界的不透明 ID、消息内容和运行时校验；
-- [`adapter-sdk`](adapter-sdk/README.md)、[`adapter-web`](adapter-web/README.md)：平台能力、入站、物理投递和内置频道 Adapter；
+- [`adapter-sdk`](adapter-sdk/README.md)、[`adapter-web`](adapter-web/README.md)：平台能力、双层活动入站、物理投递和内置频道 Adapter；
+- [`adapter-builtin-roster`](adapter-builtin-roster/README.md)：第一方 Adapter 的唯一静态组合入口；
 - [`adapter-onebot-11`](adapter-onebot-11/README.md)：协议端无关的 OneBot 11 正向 Universal WebSocket、消息映射、特殊事件和可选互动；
 - [`adapter-wecom-ai-bot`](adapter-wecom-ai-bot/README.md)：企业微信官方智能机器人长连接、媒体上传、流式处理中状态和反馈事件；
 - [`core`](core/README.md)：智能体 Revision、Connection、Channel、Binding、Event 与 Asset Service；

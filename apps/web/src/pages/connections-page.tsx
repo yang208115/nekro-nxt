@@ -1,9 +1,14 @@
-import { ArrowRight, Cable, Check, Circle, Plus, Radio, Send } from 'lucide-react'
+import { ArrowRight, Cable, Check, Circle, Plus, Radio, RotateCcw, Send, Trash2 } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { Navigate, useParams, useSearchParams } from 'react-router-dom'
 import { notify } from '../components/notifications.js'
 import { EmptyState, InlineFeedback, PageHeader } from '../components/product-feedback.js'
-import { connectionDisplayName, useProductStore, type ConnectionState } from '../product-store.js'
+import {
+  connectionDisplayName,
+  useProductStore,
+  type ConnectionState,
+  type ConnectionSummary,
+} from '../product-store.js'
 import { BindingTaskDialog } from './binding-task.js'
 import { useNxtNavigate } from '../shell/nxt-link.js'
 import { useUnsavedDraft } from '../unsaved-drafts.js'
@@ -43,11 +48,15 @@ const maskedAccount = (value: string): string => {
   return trimmed.length <= 4 ? '已提供' : `尾号 ${trimmed.slice(-4)}`
 }
 
+const connectionEventParticipants = (event: ConnectionSummary['events'][number]): string => {
+  const actor = event.actor?.displayName?.trim() || (event.actor ? '参与者' : '')
+  const sameIdentity = event.actor?.identityId === event.subject?.identityId
+  const subject = sameIdentity ? '' : event.subject?.displayName?.trim() || (event.subject ? '相关对象' : '')
+  return [actor ? `参与者：${actor}` : '', subject ? `相关对象：${subject}` : ''].filter(Boolean).join(' · ')
+}
+
 export const friendlyKnownChannelLabel = (channel: { readonly name: string; readonly kind: string }): string => {
-  if (!/^(?:group|guild|private|c2c):/u.test(channel.name)) return channel.name
-  const suffix = channel.name.match(/([\p{L}\p{N}]{4})$/u)?.[1]
-  if (channel.kind === 'group') return suffix ? `群聊（尾号 ${suffix}）` : '群聊'
-  return suffix ? `私聊（尾号 ${suffix}）` : '私聊'
+  return channel.name
 }
 
 export function ConnectionsPage() {
@@ -55,11 +64,15 @@ export function ConnectionsPage() {
   const [searchParams, setSearchParams] = useSearchParams()
   const host = useProductStore((state) => state.host)
   const connections = useProductStore((state) => state.connections)
+  const archivedConnections = useProductStore((state) => state.archivedConnections)
   const descriptors = useProductStore((state) => state.connectionAdapters)
   const agents = useProductStore((state) => state.agents)
   const channels = useProductStore((state) => state.channels)
   const navigate = useNxtNavigate()
-  const creatablePlatforms = useMemo(() => descriptors.filter((descriptor) => descriptor.userCreatable), [descriptors])
+  const creatablePlatforms = useMemo(
+    () => descriptors.filter((descriptor) => descriptor.provisioning === 'user-created'),
+    [descriptors],
+  )
   const selectedId = connectionId || connections[0]?.id || ''
   const requestedAdapterKey = searchParams.get('adapter') ?? ''
   const [createOpen, setCreateOpen] = useState(searchParams.get('create') === '1')
@@ -77,6 +90,9 @@ export function ConnectionsPage() {
   const [bindingOpen, setBindingOpen] = useState(false)
   const [aliasDraft, setAliasDraft] = useState('')
   const [aliasPending, setAliasPending] = useState(false)
+  const [activityDefaultsPending, setActivityDefaultsPending] = useState(false)
+  const [deleteOpen, setDeleteOpen] = useState(false)
+  const [deleteChannelData, setDeleteChannelData] = useState(false)
 
   useEffect(() => {
     if (searchParams.get('create') !== '1') return
@@ -122,6 +138,16 @@ export function ConnectionsPage() {
   }
 
   const selectedPlatform = creatablePlatforms.find((platform) => platform.key === selectedPlatformKey)
+  const selectedDescriptor = descriptors.find((descriptor) => descriptor.key === selected?.adapterKey)
+  const connectionActivities = (selectedDescriptor?.activities ?? []).filter((activity) => {
+    const capability = selected?.activityCapabilities[activity.key]
+    return (
+      activity.scope === 'channel' &&
+      activity.triggerable &&
+      capability?.state !== 'disabled' &&
+      capability?.state !== 'unsupported'
+    )
+  })
   const selectedTestChannelId = selected
     ? (testChannelByConnection[selected.id] ?? selected.knownChannels[0]?.id ?? '')
     : ''
@@ -202,6 +228,36 @@ export function ConnectionsPage() {
     }
   }
 
+  const updateActivityDefault = async (activityKey: string, enabled: boolean): Promise<void> => {
+    if (!selected || activityDefaultsPending) return
+    const next = enabled
+      ? [...new Set([...selected.activityTriggerDefaults, activityKey])]
+      : selected.activityTriggerDefaults.filter((key) => key !== activityKey)
+    setActivityDefaultsPending(true)
+    try {
+      await useProductStore.getState().updateConnectionActivityTriggerDefaults(selected.id, next)
+      notify('连接活动默认值已更新。', 'success', `connection-activity-defaults:${selected.id}`)
+    } catch (error) {
+      notify(
+        error instanceof Error ? error.message : String(error),
+        'error',
+        `connection-activity-defaults:${selected.id}`,
+      )
+    } finally {
+      setActivityDefaultsPending(false)
+    }
+  }
+
+  const restoreArchivedConnection = async (id: string): Promise<void> => {
+    try {
+      await useProductStore.getState().restoreConnection(id)
+      notify('连接及频道数据已恢复。', 'success', `connection-restore:${id}`)
+      setCreateOpen(false)
+    } catch (error) {
+      notify(error instanceof Error ? error.message : String(error), 'error', `connection-restore:${id}`)
+    }
+  }
+
   return (
     <div className={[styles.page, styles.detailPage].join(' ')} data-connection-page-scroll-root>
       <StageCrossfade swapKey={selected?.id ?? 'empty'}>
@@ -224,6 +280,11 @@ export function ConnectionsPage() {
                 {selectedAdapterCreatable ? (
                   <Button variant="primary" onClick={() => openCreate(selected.adapterKey)}>
                     <Plus size={15} aria-hidden="true" /> 再添加一个账号
+                  </Button>
+                ) : null}
+                {selected.userManaged ? (
+                  <Button variant="danger" size="small" onClick={() => setDeleteOpen(true)}>
+                    <Trash2 size={14} aria-hidden="true" /> 删除连接
                   </Button>
                 ) : null}
               </>
@@ -286,7 +347,7 @@ export function ConnectionsPage() {
               {selected.userManaged ? (
                 <>
                   <dt>连接账号</dt>
-                  <dd>{maskedAccount(selected.appId)}</dd>
+                  <dd>{maskedAccount(selected.accountReference)}</dd>
                   <dt>凭据</dt>
                   <dd>{selected.credentialConfigured ? '已保存' : '未配置'}</dd>
                   <dt>主动发言</dt>
@@ -294,6 +355,71 @@ export function ConnectionsPage() {
                 </>
               ) : null}
             </dl>
+
+            {connectionActivities.length > 0 ? (
+              <>
+                <div className={styles.sectionDivider} />
+                <section aria-label="频道活动默认值">
+                  <div className={styles.sectionHeading}>频道活动默认值</div>
+                  <p className={styles.secondaryText}>这里设置连接默认值；频道可跟随默认或单独覆盖。</p>
+                  <div className={styles.bindingEventSettings}>
+                    {connectionActivities.map((activity) => (
+                      <SwitchField
+                        key={activity.key}
+                        label={activity.displayName}
+                        description={selected.activityCapabilities[activity.key]?.reason ?? activity.description}
+                        checked={selected.activityTriggerDefaults.includes(activity.key)}
+                        disabled={activityDefaultsPending}
+                        onCheckedChange={(checked) => void updateActivityDefault(activity.key, checked)}
+                      />
+                    ))}
+                  </div>
+                </section>
+              </>
+            ) : null}
+
+            <div className={styles.sectionDivider} />
+            <section aria-label="连接活动">
+              <div className={styles.sectionHeading}>连接活动</div>
+              {!selected.eventsLoaded ? (
+                <Button
+                  size="small"
+                  variant="ghost"
+                  disabled={selected.eventsLoading}
+                  onClick={() => void useProductStore.getState().loadConnectionEvents(selected.id)}
+                >
+                  {selected.eventsLoading ? '正在加载…' : '加载连接活动'}
+                </Button>
+              ) : selected.events.length === 0 ? (
+                <p className={styles.secondaryText}>暂无连接活动。</p>
+              ) : (
+                <ol className={styles.connectionActivityList}>
+                  {selected.events.map((event) => (
+                    <li key={event.id}>
+                      <div className={styles.connectionActivityBody}>
+                        <span>{event.summary}</span>
+                        {connectionEventParticipants(event) ? (
+                          <small>{connectionEventParticipants(event)}</small>
+                        ) : null}
+                      </div>
+                      <time dateTime={new Date(event.occurredAt).toISOString()}>
+                        {new Date(event.occurredAt).toLocaleString('zh-CN')}
+                      </time>
+                    </li>
+                  ))}
+                </ol>
+              )}
+              {selected.eventsHasMore && selected.eventsLoaded ? (
+                <Button
+                  size="small"
+                  variant="ghost"
+                  disabled={selected.eventsLoading}
+                  onClick={() => void useProductStore.getState().loadConnectionEvents(selected.id, true)}
+                >
+                  {selected.eventsLoading ? '正在加载…' : '加载更早活动'}
+                </Button>
+              ) : null}
+            </section>
 
             <AdapterConnectionExtensionSlot
               name="connection.adapter.status"
@@ -537,18 +663,43 @@ export function ConnectionsPage() {
       >
         <div className={styles.formStack}>
           {createStage === 'platform' ? (
-            <SelectField
-              label="平台"
-              value={selectedPlatformKey}
-              onValueChange={(value) => {
-                setSelectedPlatformKey(value)
-                setCreateError('')
-              }}
-              options={creatablePlatforms.map((platform) => ({
-                value: platform.key,
-                label: platform.displayName,
-              }))}
-            />
+            <>
+              {archivedConnections.length > 0 ? (
+                <section aria-label="可恢复连接">
+                  <div className={styles.sectionHeading}>恢复已移除的连接</div>
+                  <div className={styles.testRows}>
+                    {archivedConnections.map((connection) => (
+                      <div className={styles.testRow} key={connection.id}>
+                        <span>
+                          <strong>{connection.alias?.trim() || connection.adapter}</strong>
+                          <small>{connection.channelCount} 个已保留频道</small>
+                        </span>
+                        <Button
+                          size="small"
+                          variant="ghost"
+                          onClick={() => void restoreArchivedConnection(connection.id)}
+                        >
+                          <RotateCcw size={14} aria-hidden="true" /> 恢复
+                        </Button>
+                      </div>
+                    ))}
+                  </div>
+                  <div className={styles.sectionDivider} />
+                </section>
+              ) : null}
+              <SelectField
+                label="平台"
+                value={selectedPlatformKey}
+                onValueChange={(value) => {
+                  setSelectedPlatformKey(value)
+                  setCreateError('')
+                }}
+                options={creatablePlatforms.map((platform) => ({
+                  value: platform.key,
+                  label: platform.displayName,
+                }))}
+              />
+            </>
           ) : (
             <>
               <Button type="button" size="small" variant="ghost" onClick={() => setCreateStage('platform')}>
@@ -604,6 +755,44 @@ export function ConnectionsPage() {
           )}
           {createError ? <InlineFeedback tone="error">{createError}</InlineFeedback> : null}
         </div>
+      </ConfirmDialog>
+      <ConfirmDialog
+        open={deleteOpen}
+        onOpenChange={(open) => {
+          setDeleteOpen(open)
+          if (!open) setDeleteChannelData(false)
+        }}
+        title="删除连接"
+        description={
+          deleteChannelData
+            ? '连接、凭据及其频道数据会被永久删除，无法恢复。'
+            : '连接会从当前列表移除，频道、消息、绑定和凭据会保留，可在添加连接时恢复。'
+        }
+        confirmLabel={deleteChannelData ? '永久删除连接及频道数据' : '移除连接并保留频道数据'}
+        confirmVariant="danger"
+        onConfirm={async () => {
+          if (!selected) return false
+          try {
+            await useProductStore.getState().deleteConnection(selected.id, deleteChannelData)
+            notify(
+              deleteChannelData ? '连接及频道数据已删除。' : '连接已移除，可稍后恢复。',
+              'success',
+              `connection-delete:${selected.id}`,
+            )
+            void navigate('/connections')
+            return true
+          } catch (error) {
+            notify(error instanceof Error ? error.message : String(error), 'error', `connection-delete:${selected.id}`)
+            return false
+          }
+        }}
+      >
+        <SwitchField
+          label="同时删除频道数据"
+          description="开启后会永久清理频道、消息、成员、连接活动和运行记录；关闭则保留以供恢复。"
+          checked={deleteChannelData}
+          onCheckedChange={setDeleteChannelData}
+        />
       </ConfirmDialog>
     </div>
   )

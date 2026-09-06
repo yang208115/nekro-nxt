@@ -18,6 +18,7 @@ import {
   ChannelIdSchema,
   ChannelMemberIdSchema,
   ConnectionIdSchema,
+  ConnectionEventIdSchema,
   DshPluginEntryIdSchema,
   DshPluginPackageIdSchema,
   EpisodeHandoffIdSchema,
@@ -36,7 +37,6 @@ import {
   backupCoreDatabase,
   coreSchema,
   createSqliteBackupSet,
-  openCoreDatabase,
   openMigratedCoreDatabase,
   SqliteBackupManifestSchema,
   SqliteCoreRepository,
@@ -75,7 +75,7 @@ const createFixture = async () => {
   const repository = new SqliteCoreRepository(database)
   let sequence = 0
   const core = new CoreService(repository, { now: () => 1000 + sequence, nextUlid: () => `T${++sequence}` })
-  const connection = core.createConnection({ adapterKey: 'web', config: {} })
+  const connection = core.createConnection({ adapterKey: 'fixture-alpha', config: {} })
   return { directory, database, repository, core, connection }
 }
 
@@ -156,7 +156,7 @@ const appendTextEvent = (
   core.appendInbound({
     connectionId,
     channelId,
-    adapterKey: 'web',
+    adapterKey: 'fixture-alpha',
     ...(options.platformMessageId === undefined ? {} : { platformMessageId: options.platformMessageId }),
     kind: options.kind ?? 'message-created',
     parts: [{ type: 'text', text }],
@@ -168,7 +168,7 @@ const appendTextEvent = (
 
 describe('Core SQLite baseline', () => {
   it('accepts better-sqlite3 table_list metadata and migrates a clean database', async () => {
-    expect(Object.keys(coreSchema)).toHaveLength(38)
+    expect(Object.keys(coreSchema)).toHaveLength(39)
     expect(channelEvents.logicalMessageId.name).toBe('logical_message_id')
     expect('logicalMessageId' in channels).toBe(false)
 
@@ -211,16 +211,232 @@ describe('Core SQLite baseline', () => {
     }
   })
 
+  it('persists, deduplicates, paginates, and enforces Connection Event identity ownership', async () => {
+    const { directory, database, core, connection } = await createFixture()
+    const filename = path.join(directory, 'core.sqlite')
+    const actor = core.ensurePlatformIdentity({
+      connectionId: connection.id,
+      platformUserId: 'actor-alpha',
+      displayName: '参与者甲',
+      observedAt: 1_000,
+    })
+    const subject = core.ensurePlatformIdentity({
+      connectionId: connection.id,
+      platformUserId: 'subject-alpha',
+      displayName: '参与者乙',
+      observedAt: 1_000,
+    })
+    const otherConnection = core.createConnection({ adapterKey: 'fixture-beta', config: {} })
+    const foreignIdentity = core.ensurePlatformIdentity({
+      connectionId: otherConnection.id,
+      platformUserId: 'foreign-identity',
+      observedAt: 1_000,
+    })
+
+    const first = core.appendConnectionInbound({
+      connectionId: connection.id,
+      adapterKey: 'fixture-alpha',
+      activityKey: 'account-signal',
+      summary: '连接活动一',
+      actorIdentityId: actor.id,
+      subjectIdentityId: subject.id,
+      sourceTimestamp: 1_100,
+      receivedAt: 1_200,
+      dedupeKey: 'connection-event-1',
+      facts: { source: 'fixture' },
+    })
+    expect(first.inserted).toBe(true)
+    expect(
+      core.appendConnectionInbound({
+        connectionId: connection.id,
+        adapterKey: 'fixture-alpha',
+        activityKey: 'account-signal',
+        summary: '重复活动不覆盖原事实',
+        sourceTimestamp: 1_101,
+        receivedAt: 1_201,
+        dedupeKey: 'connection-event-1',
+      }),
+    ).toEqual({ event: first.event, inserted: false })
+    for (const [dedupeKey, receivedAt] of [
+      ['connection-event-2', 1_200],
+      ['connection-event-3', 1_100],
+    ] as const) {
+      core.appendConnectionInbound({
+        connectionId: connection.id,
+        adapterKey: 'fixture-alpha',
+        activityKey: 'account-signal',
+        summary: dedupeKey,
+        sourceTimestamp: receivedAt,
+        receivedAt,
+        dedupeKey,
+      })
+    }
+    database.close()
+
+    const reopened = await openMigratedCoreDatabase(filename)
+    try {
+      const reopenedRepository = new SqliteCoreRepository(reopened)
+      const firstPage = reopenedRepository.listConnectionEvents(connection.id, { limit: 2 })
+      expect(firstPage).toHaveLength(2)
+      expect(firstPage.every(({ receivedAt }) => receivedAt === 1_200)).toBe(true)
+      const cursor = firstPage[1]!
+      expect(
+        reopenedRepository
+          .listConnectionEvents(connection.id, {
+            limit: 2,
+            before: { receivedAt: cursor.receivedAt, id: cursor.id },
+          })
+          .map(({ dedupeKey }) => dedupeKey),
+      ).toEqual(['connection-event-3'])
+      expect(() =>
+        reopenedRepository.appendConnectionEvent({
+          id: ConnectionEventIdSchema.parse('cev_FOREIGNIDENTITY'),
+          connectionId: connection.id,
+          activityKey: 'account-signal',
+          summary: '错误身份归属',
+          actorIdentityId: foreignIdentity.id,
+          sourceTimestamp: 1_300,
+          receivedAt: 1_300,
+          dedupeKey: 'foreign-identity',
+        }),
+      ).toThrow(/foreign key constraint failed/iu)
+    } finally {
+      reopened.close()
+    }
+  })
+
+  it('persists Connection defaults, restores archived Channels, and purges Connection-scoped data on request', async () => {
+    const { database, repository, core, connection } = await createFixture()
+    try {
+      core.updateConnectionActivityTriggerDefaults(connection.id, ['member-changed'])
+      const channel = core.createChannel({
+        connectionId: connection.id,
+        platformChannelId: 'restorable-channel',
+        kind: 'group',
+      })
+      const agent = createAgent(core)
+      core.createBinding({
+        channelId: channel.id,
+        agentId: agent.definition.id,
+        triggerPolicy: 'always',
+        activityTriggerOverrides: { 'member-changed': false, 'message-recalled': true },
+      })
+      appendTextEvent(core, connection.id, channel.id, 'restorable-event', '保留的频道事实', 1_100)
+      core.appendConnectionInbound({
+        connectionId: connection.id,
+        adapterKey: connection.adapterKey,
+        activityKey: 'account-signal',
+        summary: '保留的连接事实',
+        sourceTimestamp: 1_100,
+        receivedAt: 1_100,
+        dedupeKey: 'restorable-connection-event',
+      })
+
+      core.archiveConnection(connection.id)
+      expect(core.getConnection(connection.id)).toBeUndefined()
+      expect(repository.getChannel(channel.id)).toBeUndefined()
+      expect(repository.getArchivedConnection(connection.id)).toMatchObject({
+        activityTriggerDefaults: ['member-changed'],
+      })
+
+      core.restoreConnection(connection.id)
+      expect(core.getConnection(connection.id)).toMatchObject({ activityTriggerDefaults: ['member-changed'] })
+      expect(repository.getChannel(channel.id)?.id).toBe(channel.id)
+      expect(repository.getBinding(channel.id)?.activityTriggerOverrides).toEqual({
+        'member-changed': false,
+        'message-recalled': true,
+      })
+      expect(repository.listChannelEvents(channel.id)).toHaveLength(1)
+
+      core.archiveConnection(connection.id)
+      core.purgeConnection(connection.id)
+      expect(repository.getArchivedConnection(connection.id)).toBeUndefined()
+      expect(repository.listChannelIdsByConnection(connection.id)).toEqual([])
+      expect(repository.listConnectionEvents(connection.id)).toEqual([])
+      expect(database.db.select().from(channels).where(eq(channels.connectionId, connection.id)).all()).toEqual([])
+    } finally {
+      database.close()
+    }
+  })
+
+  it('upgrades schema 0018 by preserving activity keys and converting internal Channel kind atomically', async () => {
+    const directory = await temporaryDirectory()
+    const filename = path.join(directory, 'core.sqlite')
+    await createDatabaseAtMigration(filename, 18)
+    const legacy = new BetterSqlite3(filename)
+    const connectionId = ConnectionIdSchema.parse('con_ACTIVITYV2MIGRATION')
+    const channelId = ChannelIdSchema.parse('chn_ACTIVITYV2MIGRATION')
+    const eventId = ChannelEventIdSchema.parse('evt_ACTIVITYV2MIGRATION')
+    const logicalMessageId = LogicalMessageIdSchema.parse('msg_ACTIVITYV2MIGRATION')
+    try {
+      legacy
+        .prepare(
+          'INSERT INTO connections (id, adapter_key, config, credential_refs, created_at) VALUES (?, ?, ?, ?, ?)',
+        )
+        .run(connectionId, 'fixture-alpha', '{}', '{}', 1)
+      legacy
+        .prepare(
+          'INSERT INTO channels (id, connection_id, platform_channel_id, kind, created_at) VALUES (?, ?, ?, ?, ?)',
+        )
+        .run(channelId, connectionId, 'legacy-internal-channel', 'web', 1)
+      legacy
+        .prepare(
+          'INSERT INTO channel_events (id, logical_message_id, channel_id, kind, activity_type, parts, source_timestamp, received_at, dedupe_key, search_text) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        )
+        .run(
+          eventId,
+          logicalMessageId,
+          channelId,
+          'control',
+          'legacy-account-signal',
+          '[]',
+          2,
+          2,
+          'legacy-activity',
+          '',
+        )
+    } finally {
+      legacy.close()
+    }
+
+    const migrated = await openMigratedCoreDatabase(filename)
+    try {
+      expect(
+        migrated.db.select({ kind: channels.kind }).from(channels).where(eq(channels.id, channelId)).get(),
+      ).toEqual({ kind: 'internal' })
+      expect(
+        migrated.db
+          .select({ activityKey: channelEvents.activityKey })
+          .from(channelEvents)
+          .where(eq(channelEvents.id, eventId))
+          .get(),
+      ).toEqual({ activityKey: 'legacy-account-signal' })
+      const native = new BetterSqlite3(filename)
+      try {
+        const columns = z
+          .array(z.object({ name: z.string() }).passthrough())
+          .parse(native.pragma('table_info(channel_bindings)'))
+          .map(({ name }) => name)
+        expect(columns).toContain('activity_triggers')
+        expect(columns).not.toContain('event_triggers')
+        expect(native.pragma('foreign_key_check')).toEqual([])
+      } finally {
+        native.close()
+      }
+    } finally {
+      migrated.close()
+    }
+  })
+
   it('rebuilds a populated referenced Episode table while migrating from schema 0002', async () => {
     const directory = await temporaryDirectory()
     const filename = path.join(directory, 'core.sqlite')
     await createDatabaseAtMigration(filename, 2)
-    const oldDatabase = openCoreDatabase(filename)
-    const oldRepository = new SqliteCoreRepository(oldDatabase)
-    const oldCore = new CoreService(oldRepository, { now: () => 1000, nextUlid: () => 'MIGRATION' })
-    const connection = oldCore.createConnection({ adapterKey: 'web', config: {} })
-    oldDatabase.close()
     const legacy = new BetterSqlite3(filename)
+    const connectionId = ConnectionIdSchema.parse('con_MIGRATION')
+    legacy
+      .prepare('INSERT INTO connections (id, adapter_key, config, credential_refs, created_at) VALUES (?, ?, ?, ?, ?)')
+      .run(connectionId, 'fixture-alpha', '{}', '{}', 1)
     const agentId = AgentIdSchema.parse('agt_MIGRATION')
     const agentRevisionId = AgentRevisionIdSchema.parse('arev_MIGRATION')
     legacy.prepare('INSERT INTO agent_definitions (id, created_at) VALUES (?, ?)').run(agentId, 1)
@@ -253,7 +469,7 @@ describe('Core SQLite baseline', () => {
       .prepare(
         'INSERT INTO channels (id, connection_id, platform_channel_id, kind, display_name, created_at) VALUES (?, ?, ?, ?, ?, ?)',
       )
-      .run(channelId, connection.id, 'migration-channel', 'web', null, 1)
+      .run(channelId, connectionId, 'migration-channel', 'web', null, 1)
     legacy
       .prepare(
         'INSERT INTO channel_events (id, logical_message_id, channel_id, platform_message_id, kind, sender_member_id, parts, source_timestamp, received_at, dedupe_key, facts, search_text) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
@@ -313,11 +529,15 @@ describe('Core SQLite baseline', () => {
       })
       expect(
         migrated.db
-          .select({ autoCreatedForAgentId: channels.autoCreatedForAgentId, deletedAt: channels.deletedAt })
+          .select({
+            autoCreatedForAgentId: channels.autoCreatedForAgentId,
+            deletedAt: channels.deletedAt,
+            kind: channels.kind,
+          })
           .from(channels)
           .where(eq(channels.id, channelId))
           .get(),
-      ).toEqual({ autoCreatedForAgentId: null, deletedAt: null })
+      ).toEqual({ autoCreatedForAgentId: null, deletedAt: null, kind: 'internal' })
       expect(repository.closeEpisode(episodeId, 'context-cleared', eventId, 4)).toMatchObject({
         status: 'closed',
         closeReason: 'context-cleared',
@@ -516,7 +736,7 @@ describe('Core SQLite baseline', () => {
         },
         {
           connectionId: connection.id,
-          kind: 'web',
+          kind: 'internal',
           platformChannelId: 'fixed-channel',
           triggerPolicy: 'always',
         },
@@ -534,7 +754,7 @@ describe('Core SQLite baseline', () => {
           },
           {
             connectionId: connection.id,
-            kind: 'web',
+            kind: 'internal',
             platformChannelId: 'fixed-channel',
             triggerPolicy: 'always',
           },
@@ -558,7 +778,7 @@ describe('Core SQLite baseline', () => {
         },
         {
           connectionId: connection.id,
-          kind: 'web',
+          kind: 'internal',
           platformChannelId: 'tombstone-channel',
           triggerPolicy: 'always',
         },
@@ -689,13 +909,13 @@ describe('Core SQLite baseline', () => {
     try {
       const otherConnection = core.createConnection({ adapterKey: 'qq-openclaw', config: { token: 'x' } })
       expect(repository.getConnection(ConnectionIdSchema.parse('con_MISSING'))).toBeUndefined()
-      expect(repository.listConnectionIdsByAdapter('web')).toEqual([connection.id])
+      expect(repository.listConnectionIdsByAdapter('fixture-alpha')).toEqual([connection.id])
       expect(repository.listConnectionIdsByAdapter('missing')).toEqual([])
 
       const channel = core.ensureChannel({
         connectionId: connection.id,
         platformChannelId: 'optional-channel',
-        kind: 'web',
+        kind: 'internal',
         observedAt: 10,
       })
       const updatedChannel = core.ensureChannel({
@@ -759,7 +979,7 @@ describe('Core SQLite baseline', () => {
       const firstEvent = core.appendInbound({
         connectionId: connection.id,
         channelId: channel.id,
-        adapterKey: 'web',
+        adapterKey: 'fixture-alpha',
         platformMessageId: 'platform-in-1',
         kind: 'message-created',
         senderMemberId: observed.member.id,
@@ -806,14 +1026,14 @@ describe('Core SQLite baseline', () => {
 
       expect(() => repository.createConnection(connection)).toThrow()
       expect(() =>
-        core.createChannel({ connectionId: connection.id, platformChannelId: 'optional-channel', kind: 'web' }),
+        core.createChannel({ connectionId: connection.id, platformChannelId: 'optional-channel', kind: 'internal' }),
       ).toThrow()
       expect(() =>
         repository.createChannel({
           id: ChannelIdSchema.parse('chn_BADFK'),
           connectionId: ConnectionIdSchema.parse('con_MISSING'),
           platformChannelId: 'bad-fk',
-          kind: 'web',
+          kind: 'internal',
           createdAt: 1,
         }),
       ).toThrow()
@@ -821,7 +1041,7 @@ describe('Core SQLite baseline', () => {
         id: ChannelIdSchema.parse('chn_BADCHECK'),
         connectionId: connection.id,
         platformChannelId: 'bad-check',
-        kind: 'web',
+        kind: 'internal',
         createdAt: 1,
       }
       Object.defineProperty(invalidChannel, 'kind', { value: 'invalid' })
@@ -831,7 +1051,7 @@ describe('Core SQLite baseline', () => {
         agentId: agent.definition.id,
         triggerPolicy: 'always',
         processingFeedback: 'auto',
-        eventTriggers: [],
+        activityTriggerOverrides: {},
         boundAt: 1,
       }
       Object.defineProperty(invalidBinding, 'triggerPolicy', { value: 'invalid' })
@@ -844,7 +1064,7 @@ describe('Core SQLite baseline', () => {
   it('lists platform identities once per Connection and retains historical-only users', async () => {
     const { database, repository, core, connection } = await createFixture()
     try {
-      const secondConnection = core.createConnection({ adapterKey: 'web', config: {} })
+      const secondConnection = core.createConnection({ adapterKey: 'fixture-alpha', config: {} })
       const firstChannel = core.createChannel({
         connectionId: connection.id,
         platformChannelId: 'group-one',
@@ -922,7 +1142,7 @@ describe('relations, admissions and outbox', () => {
       const event = {
         connectionId: connection.id,
         channelId: channel.id,
-        adapterKey: 'web',
+        adapterKey: 'fixture-alpha',
         platformMessageId: 'platform-1',
         kind: 'message-created' as const,
         parts: [{ type: 'image' as const, assetId }],
@@ -953,7 +1173,7 @@ describe('relations, admissions and outbox', () => {
       core.appendInbound({
         connectionId: connection.id,
         channelId: channel.id,
-        adapterKey: 'web',
+        adapterKey: 'fixture-alpha',
         kind: 'message-created',
         parts: [{ type: 'text', text: '没有资源 occurrence' }],
         platformTimestamp: 12,
@@ -973,7 +1193,7 @@ describe('relations, admissions and outbox', () => {
       const original = core.appendInbound({
         connectionId: connection.id,
         channelId: channel.id,
-        adapterKey: 'web',
+        adapterKey: 'fixture-alpha',
         platformMessageId: 'platform-original',
         kind: 'message-created',
         parts: [{ type: 'text', text: '原始事实' }],
@@ -984,17 +1204,17 @@ describe('relations, admissions and outbox', () => {
       const recalled = core.appendInbound({
         connectionId: connection.id,
         channelId: channel.id,
-        adapterKey: 'web',
+        adapterKey: 'fixture-alpha',
         kind: 'message-deleted',
-        activityType: 'message-recalled',
+        activityKey: 'message-recalled',
         targetPlatformMessageId: 'platform-original',
-        parts: [{ type: 'rich', adapterKey: 'web', kind: 'message-recalled', summary: '一条消息被撤回。' }],
+        parts: [{ type: 'rich', adapterKey: 'fixture-alpha', kind: 'message-recalled', summary: '一条消息被撤回。' }],
         platformTimestamp: 21,
         receivedAt: 21,
         dedupeKey: 'recall-event',
       })
       expect(recalled.event).toMatchObject({
-        activityType: 'message-recalled',
+        activityKey: 'message-recalled',
         targetPlatformMessageId: 'platform-original',
         targetLogicalMessageId: original.event.logicalMessageId,
       })
@@ -1005,11 +1225,11 @@ describe('relations, admissions and outbox', () => {
       const feedback = core.appendInbound({
         connectionId: connection.id,
         channelId: channel.id,
-        adapterKey: 'web',
+        adapterKey: 'fixture-alpha',
         kind: 'control',
-        activityType: 'message-feedback-negative',
+        activityKey: 'message-feedback-negative',
         targetLogicalMessageId: original.event.logicalMessageId,
-        parts: [{ type: 'rich', adapterKey: 'web', kind: 'feedback', summary: '成员提交了负向反馈。' }],
+        parts: [{ type: 'rich', adapterKey: 'fixture-alpha', kind: 'feedback', summary: '成员提交了负向反馈。' }],
         platformTimestamp: 22,
         receivedAt: 22,
         dedupeKey: 'feedback-event',
@@ -1024,11 +1244,11 @@ describe('relations, admissions and outbox', () => {
         core.appendInbound({
           connectionId: connection.id,
           channelId: otherChannel.id,
-          adapterKey: 'web',
+          adapterKey: 'fixture-alpha',
           kind: 'control',
-          activityType: 'message-feedback-negative',
+          activityKey: 'message-feedback-negative',
           targetLogicalMessageId: original.event.logicalMessageId,
-          parts: [{ type: 'rich', adapterKey: 'web', kind: 'feedback', summary: '无效跨频道反馈。' }],
+          parts: [{ type: 'rich', adapterKey: 'fixture-alpha', kind: 'feedback', summary: '无效跨频道反馈。' }],
           platformTimestamp: 23,
           receivedAt: 23,
           dedupeKey: 'invalid-feedback-event',
@@ -1049,7 +1269,7 @@ describe('relations, admissions and outbox', () => {
         core.appendInbound({
           connectionId: connection.id,
           channelId: channel.id,
-          adapterKey: 'web',
+          adapterKey: 'fixture-alpha',
           platformMessageId: `p-${index}`,
           kind: 'message-created',
           parts: [{ type: 'text', text: `消息 ${index}` }],
@@ -1068,11 +1288,15 @@ describe('relations, admissions and outbox', () => {
     const { database, repository, core, connection } = await createFixture()
     try {
       const agent = createAgent(core)
-      const channel = core.createChannel({ connectionId: connection.id, platformChannelId: 'runtime', kind: 'web' })
+      const channel = core.createChannel({
+        connectionId: connection.id,
+        platformChannelId: 'runtime',
+        kind: 'internal',
+      })
       const event = core.appendInbound({
         connectionId: connection.id,
         channelId: channel.id,
-        adapterKey: 'web',
+        adapterKey: 'fixture-alpha',
         kind: 'message-created',
         parts: [{ type: 'text', text: 'hello' }],
         platformTimestamp: 1,
@@ -1198,7 +1422,7 @@ describe('relations, admissions and outbox', () => {
       const inbound = fixture.core.appendInbound({
         connectionId: fixture.connection.id,
         channelId: channel.id,
-        adapterKey: 'web',
+        adapterKey: 'fixture-alpha',
         kind: 'message-created',
         parts: [{ type: 'text', text: '同频道引用目标' }],
         platformTimestamp: 10,
@@ -1208,7 +1432,7 @@ describe('relations, admissions and outbox', () => {
       const otherInbound = fixture.core.appendInbound({
         connectionId: fixture.connection.id,
         channelId: otherChannel.id,
-        adapterKey: 'web',
+        adapterKey: 'fixture-alpha',
         kind: 'message-created',
         parts: [{ type: 'text', text: '其他频道内容' }],
         platformTimestamp: 11,
@@ -1275,8 +1499,12 @@ describe('relations, admissions and outbox', () => {
   it('searches literal percent, underscore and Chinese text within one Channel only', async () => {
     const { database, repository, core, connection } = await createFixture()
     try {
-      const first = core.createChannel({ connectionId: connection.id, platformChannelId: 'search-1', kind: 'web' })
-      const second = core.createChannel({ connectionId: connection.id, platformChannelId: 'search-2', kind: 'web' })
+      const first = core.createChannel({ connectionId: connection.id, platformChannelId: 'search-1', kind: 'internal' })
+      const second = core.createChannel({
+        connectionId: connection.id,
+        platformChannelId: 'search-2',
+        kind: 'internal',
+      })
       for (const [channel, text, key] of [
         [first, '进度 100%_完成', 'first'],
         [second, '进度 100%_完成', 'second'],
@@ -1284,7 +1512,7 @@ describe('relations, admissions and outbox', () => {
         core.appendInbound({
           connectionId: connection.id,
           channelId: channel.id,
-          adapterKey: 'web',
+          adapterKey: 'fixture-alpha',
           kind: 'message-created',
           parts: [{ type: 'text', text }],
           platformTimestamp: 1,
@@ -1306,7 +1534,7 @@ describe('relations, admissions and outbox', () => {
       const channel = core.createChannel({
         connectionId: connection.id,
         platformChannelId: 'runtime-lifecycle',
-        kind: 'web',
+        kind: 'internal',
       })
       const openedEvent = appendTextEvent(core, connection.id, channel.id, 'lifecycle-open', 'open', 1)
       const episodeId = EpisodeIdSchema.parse('eps_LIFECYCLE1')
@@ -1532,7 +1760,7 @@ describe('relations, admissions and outbox', () => {
       const channel = core.createChannel({
         connectionId: connection.id,
         platformChannelId: 'outbox-cases',
-        kind: 'web',
+        kind: 'internal',
       })
       const openedEvent = appendTextEvent(core, connection.id, channel.id, 'outbox-open', 'history start', 1)
       const episodeId = EpisodeIdSchema.parse('eps_OUTBOXCASES')
@@ -2339,7 +2567,7 @@ describe('Extension and backup', () => {
       const channel = core.createChannel({
         connectionId: connection.id,
         platformChannelId: 'corrupt-channel',
-        kind: 'web',
+        kind: 'internal',
       })
       database.close()
       mutateSqlite(filename, 'UPDATE connections SET config = ? WHERE id = ?', '{not-json', connection.id)
@@ -2412,7 +2640,7 @@ describe('Extension and backup', () => {
       const firstChannel = core.createChannel({
         connectionId: connection.id,
         platformChannelId: 'storage-reset-first',
-        kind: 'web',
+        kind: 'internal',
       })
       const firstEvent = appendTextEvent(core, connection.id, firstChannel.id, 'storage-reset-first', 'first', 1)
       const firstEpisodeId = EpisodeIdSchema.parse('eps_STORAGERESET1')
@@ -2440,7 +2668,7 @@ describe('Extension and backup', () => {
       const secondChannel = core.createChannel({
         connectionId: connection.id,
         platformChannelId: 'storage-reset-second',
-        kind: 'web',
+        kind: 'internal',
       })
       const secondEvent = appendTextEvent(core, connection.id, secondChannel.id, 'storage-reset-second', 'second', 4)
       const secondEpisodeId = EpisodeIdSchema.parse('eps_STORAGERESET2')
@@ -2486,7 +2714,7 @@ describe('Extension and backup', () => {
       const channel = core.createChannel({
         connectionId: connection.id,
         platformChannelId: 'authoring-ledger',
-        kind: 'web',
+        kind: 'internal',
       })
       const event = appendTextEvent(core, connection.id, channel.id, 'authoring-ledger', '创建验收看板', 1)
       const episodeId = EpisodeIdSchema.parse('eps_AUTHORINGLEDGER')

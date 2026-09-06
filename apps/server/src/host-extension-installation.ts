@@ -1,4 +1,4 @@
-import { AdapterRegistry, type AdapterHostContributionV1 } from '@nekro-nxt/adapter-sdk'
+import { AdapterRegistry, type AdapterHostContributionV2 } from '@nekro-nxt/adapter-sdk'
 import { canonicalJson } from '@nekro-nxt/core'
 import type {
   ExtensionBuildArtifact,
@@ -12,7 +12,7 @@ import { JsonValueSchema } from '@nekro-nxt/contracts'
 import { createHash } from 'node:crypto'
 import { pathToFileURL } from 'node:url'
 
-const descriptorDigest = (contribution: AdapterHostContributionV1): string =>
+const descriptorDigest = (contribution: AdapterHostContributionV2): string =>
   createHash('sha256')
     .update(canonicalJson(JsonValueSchema.parse(JSON.parse(JSON.stringify(contribution.descriptor)))))
     .digest('hex')
@@ -23,7 +23,7 @@ const isUnknownRecord = (value: unknown): value is Readonly<Record<string, unkno
 export interface AdapterHostInstallationCallbacks {
   expectedAdapter(revision: Revision): { readonly key: string; readonly descriptorDigest: string }
   assertAdapterKeyAvailable(adapterKey: string, extensionId: Revision['extensionId']): Promise<void>
-  register(owner: string, contribution: AdapterHostContributionV1): Promise<{ dispose(): Promise<void> }>
+  register(owner: string, contribution: AdapterHostContributionV2): Promise<{ dispose(): Promise<void> }>
   mountConnections(adapterKey: string): Promise<void>
   waitUntilSafe(adapterKey: string): Promise<void>
 }
@@ -60,7 +60,7 @@ export class ServerAdapterHostInstallationHost implements HostExtensionInstallat
       defineTool: () => forbidden('智能体工具'),
       registerTool: () => forbidden('智能体工具'),
       handle: () => forbidden('智能体 RPC'),
-      registerAdapter: (contribution: AdapterHostContributionV1) => {
+      registerAdapter: (contribution: AdapterHostContributionV2) => {
         if (candidateHandle) throw new Error('一个适配器 Revision 只能注册一个 Adapter Contribution。')
         candidateHandle = candidate.register(`candidate:${revision.id}`, contribution)
         return () => void candidateHandle?.dispose()

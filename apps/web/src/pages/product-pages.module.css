@@ -1904,6 +1904,46 @@
   background: color-mix(in srgb, var(--nxt-bg-subtle) 64%, transparent);
 }
 
+.connectionActivityList {
+  display: grid;
+  gap: 8px;
+  max-height: min(360px, 45vh);
+  margin: 8px 0 12px;
+  padding: 0 4px 0 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  list-style: none;
+}
+
+.connectionActivityList li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  border-bottom: 1px solid var(--nxt-border-subtle);
+  padding: 8px 0;
+  color: var(--nxt-text-secondary);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.connectionActivityBody {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.connectionActivityBody small {
+  color: var(--nxt-text-muted);
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.connectionActivityList time {
+  color: var(--nxt-text-muted);
+  white-space: nowrap;
+}
+
 .inlineFieldHint {
   color: var(--nxt-text-muted);
   font-size: 11px;

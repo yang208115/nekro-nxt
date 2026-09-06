@@ -590,22 +590,22 @@ describe('managed DSH plugin lifecycle', () => {
     })
     await runtime.start()
     try {
-      const first = await runtime.createAgentWithWebChannel({
+      const first = await runtime.createAgentWithInternalChannel({
         displayName: '甲智能体',
         persona: '',
         model: { provider: 'test-provider', model: 'chat-model' },
       })
-      const second = await runtime.createAgentWithWebChannel({
+      const second = await runtime.createAgentWithInternalChannel({
         displayName: '乙智能体',
         persona: '',
         model: { provider: 'test-provider', model: 'chat-model' },
       })
-      await runtime.web.postMessage({
+      await runtime.internalChannel.postMessage({
         channelId: first.channelId,
         clientEventId: 'agent-a-session',
         parts: [{ type: 'text', text: '建立甲会话。' }],
       })
-      await runtime.web.postMessage({
+      await runtime.internalChannel.postMessage({
         channelId: second.channelId,
         clientEventId: 'agent-b-session',
         parts: [{ type: 'text', text: '建立乙会话。' }],
@@ -669,7 +669,7 @@ describe('managed DSH plugin lifecycle', () => {
     })
     await runtime.start()
     try {
-      const agent = await runtime.createAgentWithWebChannel({
+      const agent = await runtime.createAgentWithInternalChannel({
         displayName: '恢复隔离测试智能体',
         persona: '',
         model: { provider: 'test-provider', model: 'chat-model' },
@@ -692,7 +692,7 @@ describe('managed DSH plugin lifecycle', () => {
       })
 
       await expect(
-        runtime.web.postMessage({
+        runtime.internalChannel.postMessage({
           channelId: agent.channelId,
           clientEventId: 'broken-plugin-session',
           parts: [{ type: 'text', text: '即使扩展损坏，也要建立会话。' }],

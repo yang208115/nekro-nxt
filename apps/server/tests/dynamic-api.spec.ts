@@ -61,13 +61,13 @@ describe('NekroNxt domain API — browser dynamic client circuit', () => {
     })
     await runtime.start()
 
-    const entity = await runtime.createAgentWithWebChannel({
+    const entity = await runtime.createAgentWithInternalChannel({
       displayName: '创造智能体',
       persona: '',
       model: { provider: 'test-provider', model: 'chat-model' },
       capabilities: { dynamicCreation: true },
     })
-    await runtime.web.postMessage({
+    await runtime.internalChannel.postMessage({
       channelId: entity.channelId,
       clientEventId: 'seed-session',
       parts: [{ type: 'text', text: '建立活动会话。' }],
@@ -76,13 +76,13 @@ describe('NekroNxt domain API — browser dynamic client circuit', () => {
       .listActiveEpisodesForAgent(entity.agentId)
       .find((candidate) => candidate.dshSessionId !== undefined)
     const dshSessionId = episode!.dshSessionId!
-    const other = await runtime.createAgentWithWebChannel({
+    const other = await runtime.createAgentWithInternalChannel({
       displayName: '另一个创造智能体',
       persona: '',
       model: { provider: 'test-provider', model: 'chat-model' },
       capabilities: { dynamicCreation: true },
     })
-    await runtime.web.postMessage({
+    await runtime.internalChannel.postMessage({
       channelId: other.channelId,
       clientEventId: 'seed-other-session',
       parts: [{ type: 'text', text: '建立另一条活动会话。' }],
@@ -312,13 +312,13 @@ describe('NekroNxt domain API — browser dynamic client circuit', () => {
     await runtime.start()
     let disposed = false
     try {
-      const entity = await runtime.createAgentWithWebChannel({
+      const entity = await runtime.createAgentWithInternalChannel({
         displayName: '恢复验证智能体',
         persona: '',
         model: { provider: 'test-provider', model: 'chat-model' },
         capabilities: { dynamicCreation: true },
       })
-      await runtime.web.postMessage({
+      await runtime.internalChannel.postMessage({
         channelId: entity.channelId,
         clientEventId: 'seed-recovery-session',
         parts: [{ type: 'text', text: '建立恢复测试会话。' }],

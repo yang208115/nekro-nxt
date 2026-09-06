@@ -4,6 +4,7 @@ import type {
   AdapterDeliveryReceipt,
   AdapterPhysicalPlan,
   AdapterOutboundCapabilities,
+  AdapterRuntimeCapabilities,
   InboundCommitResult,
   PhysicalDeliveryRequest,
 } from '@nekro-nxt/adapter-sdk'
@@ -75,9 +76,12 @@ export const QQ_OPENCLAW_CONNECTION_DEFINITION = defineAdapterConnection({
   key: QQ_OPENCLAW_ADAPTER_KEY,
   displayName: 'QQ 官方机器人',
   description: '连接 QQ 官方机器人账号，支持收发群聊消息',
-  userCreatable: true,
+  provisioning: 'user-created',
   aliasEditable: true,
   channelDiscovery: 'adapter-observed',
+  channelKinds: ['direct', 'group'],
+  activities: [],
+  features: {},
   diagnostics: { receive: true, send: true },
   configurationSchema: QQOpenClawConnectionConfigurationSchema,
   credentialsSchema: QQOpenClawCredentialsSchema,
@@ -139,7 +143,10 @@ export interface QQIdentityDirectory {
 }
 
 export interface QQAssetSource {
-  read(assetId: AssetId): Promise<{
+  read(
+    assetId: AssetId,
+    channelId: ChannelId,
+  ): Promise<{
     readonly bytes: Uint8Array
     readonly mediaType: string
     readonly fileName?: string
@@ -382,7 +389,7 @@ export class QQReplyBudget {
 }
 
 export class QQOpenClawConnection implements AdapterConnectionRuntime {
-  readonly capabilities: AdapterOutboundCapabilities
+  readonly capabilities: AdapterRuntimeCapabilities
   readonly #context: AdapterConnectionContext
   readonly #config: QQResolvedOpenClawConfig
   readonly #directory: QQIdentityDirectory
@@ -412,10 +419,13 @@ export class QQOpenClawConnection implements AdapterConnectionRuntime {
     this.#onQuoteDiagnostic = dependencies.onQuoteDiagnostic
     this.#transport = dependencies.transport
     this.capabilities = {
-      ...QQ_OPENCLAW_CAPABILITIES,
-      proactiveSend: this.#config.proactiveSend,
-      maxTextLength: this.#config.maxTextLength,
-      maxAssetBytes: this.#config.maxAssetBytes,
+      outbound: {
+        ...QQ_OPENCLAW_CAPABILITIES,
+        proactiveSend: this.#config.proactiveSend,
+        maxTextLength: this.#config.maxTextLength,
+        maxAssetBytes: this.#config.maxAssetBytes,
+      },
+      activities: {},
     }
   }
 
@@ -690,7 +700,7 @@ export class QQOpenClawConnection implements AdapterConnectionRuntime {
       ...(message.replyExpiresAt === undefined ? {} : { expiresAt: message.replyExpiresAt }),
       ...(message.remainingReplies === undefined ? {} : { remainingReplies: message.remainingReplies }),
     })
-    const commit = await this.#context.acceptInbound({
+    const commit = await this.#context.acceptChannelInbound({
       connectionId: this.#context.connectionId,
       channelId,
       adapterKey: QQ_OPENCLAW_ADAPTER_KEY,
@@ -804,7 +814,7 @@ export class QQOpenClawConnection implements AdapterConnectionRuntime {
     if (part.type !== 'image' && part.type !== 'file' && part.type !== 'audio') {
       throw new Error(`QQ cannot deliver this physical part: ${part.type}`)
     }
-    const source = await this.#assets.read(part.assetId)
+    const source = await this.#assets.read(part.assetId, request.channelId)
     if (source.bytes.byteLength > this.#config.maxAssetBytes)
       throw new Error('QQ media exceeds the configured size limit.')
     const fileName = part.type === 'file' ? (part.name ?? source.fileName) : source.fileName
@@ -823,3 +833,5 @@ export class QQOpenClawConnection implements AdapterConnectionRuntime {
     })
   }
 }
+
+export { createQQOpenClawHostContribution } from './host-contribution.js'

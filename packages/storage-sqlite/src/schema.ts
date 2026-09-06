@@ -7,10 +7,11 @@ import type {
   AdmissionId,
   AssetId,
   ChannelEventId,
-  ChannelActivityType,
+  AdapterActivityKey,
   ChannelId,
   ChannelMemberId,
   ConnectionId,
+  ConnectionEventId,
   DshPluginEntryId,
   DshPluginPackageId,
   EpisodeHandoffId,
@@ -108,7 +109,9 @@ export const connections = sqliteTable(
     alias: text('alias'),
     config: jsonText<JsonValue>('config').notNull(),
     credentialRefs: jsonText<Readonly<Record<string, string>>>('credential_refs').notNull(),
+    activityTriggerDefaults: jsonText<readonly AdapterActivityKey[]>('activity_trigger_defaults').notNull().default([]),
     createdAt: integer('created_at').notNull(),
+    archivedAt: integer('archived_at'),
   },
   (table) => [index('connections_adapter_idx').on(table.adapterKey, table.createdAt)],
 )
@@ -131,7 +134,7 @@ export const channels = sqliteTable(
       .notNull()
       .references(() => connections.id, { onDelete: 'restrict' }),
     platformChannelId: text('platform_channel_id').notNull(),
-    kind: text({ enum: ['web', 'direct', 'group'] }).notNull(),
+    kind: text({ enum: ['internal', 'direct', 'group'] }).notNull(),
     displayName: text('display_name'),
     autoCreatedForAgentId: text('auto_created_for_agent_id').$type<AgentId>(),
     createdAt: integer('created_at').notNull(),
@@ -139,7 +142,7 @@ export const channels = sqliteTable(
   },
   (table) => [
     uniqueIndex('channels_connection_platform_uq').on(table.connectionId, table.platformChannelId),
-    check('channels_kind_ck', sql`${table.kind} IN ('web', 'direct', 'group')`),
+    check('channels_kind_ck', sql`${table.kind} IN ('internal', 'direct', 'group')`),
     foreignKey({
       name: 'channels_auto_created_agent_fk',
       columns: [table.autoCreatedForAgentId],
@@ -159,7 +162,10 @@ export const platformIdentities = sqliteTable(
     platformUserId: text('platform_user_id').notNull(),
     displayName: text('display_name'),
   },
-  (table) => [uniqueIndex('platform_identities_connection_user_uq').on(table.connectionId, table.platformUserId)],
+  (table) => [
+    uniqueIndex('platform_identities_connection_user_uq').on(table.connectionId, table.platformUserId),
+    uniqueIndex('platform_identities_id_connection_uq').on(table.id, table.connectionId),
+  ],
 )
 
 export const channelMembers = sqliteTable(
@@ -179,6 +185,39 @@ export const channelMembers = sqliteTable(
   (table) => [uniqueIndex('channel_members_channel_identity_uq').on(table.channelId, table.platformIdentityId)],
 )
 
+export const connectionEvents = sqliteTable(
+  'connection_events',
+  {
+    id: text().$type<ConnectionEventId>().primaryKey(),
+    connectionId: text('connection_id')
+      .$type<ConnectionId>()
+      .notNull()
+      .references(() => connections.id, { onDelete: 'restrict' }),
+    activityKey: text('activity_key').$type<AdapterActivityKey>().notNull(),
+    summary: text().notNull(),
+    actorIdentityId: text('actor_identity_id').$type<PlatformIdentityId>(),
+    subjectIdentityId: text('subject_identity_id').$type<PlatformIdentityId>(),
+    sourceTimestamp: integer('source_timestamp').notNull(),
+    receivedAt: integer('received_at').notNull(),
+    dedupeKey: text('dedupe_key').notNull(),
+    facts: jsonText<Readonly<Record<string, JsonValue>>>('facts'),
+  },
+  (table) => [
+    uniqueIndex('connection_events_connection_dedupe_uq').on(table.connectionId, table.dedupeKey),
+    index('connection_events_history_idx').on(table.connectionId, table.receivedAt, table.id),
+    foreignKey({
+      name: 'connection_events_actor_fk',
+      columns: [table.actorIdentityId, table.connectionId],
+      foreignColumns: [platformIdentities.id, platformIdentities.connectionId],
+    }).onDelete('restrict'),
+    foreignKey({
+      name: 'connection_events_subject_fk',
+      columns: [table.subjectIdentityId, table.connectionId],
+      foreignColumns: [platformIdentities.id, platformIdentities.connectionId],
+    }).onDelete('restrict'),
+  ],
+)
+
 export const channelBindings = sqliteTable(
   'channel_bindings',
   {
@@ -196,7 +235,10 @@ export const channelBindings = sqliteTable(
     processingFeedback: text('processing_feedback', { enum: ['auto', 'off'] })
       .notNull()
       .default('auto'),
-    eventTriggers: jsonText<readonly ChannelActivityType[]>('event_triggers').notNull().default([]),
+    activityTriggerOverridesEnabled: jsonText<readonly AdapterActivityKey[]>('activity_triggers').notNull().default([]),
+    activityTriggerSuppressions: jsonText<readonly AdapterActivityKey[]>('activity_trigger_suppressions')
+      .notNull()
+      .default([]),
     boundAt: integer('bound_at').notNull(),
   },
   (table) => [
@@ -222,7 +264,7 @@ export const channelEvents = sqliteTable(
     kind: text({
       enum: ['message-created', 'message-edited', 'message-deleted', 'member-updated', 'reaction', 'control'],
     }).notNull(),
-    activityType: text('activity_type').$type<ChannelActivityType>(),
+    activityKey: text('activity_key').$type<AdapterActivityKey>(),
     targetPlatformMessageId: text('target_platform_message_id'),
     targetLogicalMessageId: text('target_logical_message_id').$type<LogicalMessageId>(),
     senderMemberId: text('sender_member_id').$type<ChannelMemberId>(),
@@ -980,6 +1022,7 @@ export const coreSchema = {
   agentCurrentRevisions,
   connections,
   connectionState,
+  connectionEvents,
   channels,
   platformIdentities,
   channelMembers,

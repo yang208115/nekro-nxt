@@ -171,10 +171,27 @@ export class SqliteCoreRepository implements CurrentRepository {
     this.#channels.createConnection(...args)
   readonly updateConnectionAlias = (...args: Parameters<CoreRepository['updateConnectionAlias']>) =>
     this.#channels.updateConnectionAlias(...args)
+  readonly updateConnectionActivityTriggerDefaults = (
+    ...args: Parameters<CoreRepository['updateConnectionActivityTriggerDefaults']>
+  ) => this.#channels.updateConnectionActivityTriggerDefaults(...args)
+  readonly archiveConnection = (...args: Parameters<CoreRepository['archiveConnection']>) =>
+    this.#channels.archiveConnection(...args)
+  readonly restoreConnection = (...args: Parameters<CoreRepository['restoreConnection']>) =>
+    this.#channels.restoreConnection(...args)
+  readonly purgeConnection = (...args: Parameters<CoreRepository['purgeConnection']>) =>
+    this.#channels.purgeConnection(...args)
   readonly getConnection = (...args: Parameters<CoreRepository['getConnection']>) =>
     this.#channels.getConnection(...args)
+  readonly getArchivedConnection = (...args: Parameters<CoreRepository['getArchivedConnection']>) =>
+    this.#channels.getArchivedConnection(...args)
+  readonly listArchivedConnections = (...args: Parameters<CoreRepository['listArchivedConnections']>) =>
+    this.#channels.listArchivedConnections(...args)
   readonly listConnectionIdsByAdapter = (...args: Parameters<CoreRepository['listConnectionIdsByAdapter']>) =>
     this.#channels.listConnectionIdsByAdapter(...args)
+  readonly appendConnectionEvent = (...args: Parameters<CoreRepository['appendConnectionEvent']>) =>
+    this.#channels.appendConnectionEvent(...args)
+  readonly listConnectionEvents = (...args: Parameters<CoreRepository['listConnectionEvents']>) =>
+    this.#channels.listConnectionEvents(...args)
   readonly createChannel = (...args: Parameters<CoreRepository['createChannel']>) =>
     this.#channels.createChannel(...args)
   readonly ensureChannel = (...args: Parameters<CoreRepository['ensureChannel']>) =>

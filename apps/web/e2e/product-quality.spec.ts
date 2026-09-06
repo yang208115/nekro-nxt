@@ -10,12 +10,14 @@ import {
   ChannelIdSchema,
   ChannelMemberIdSchema,
   ConnectionIdSchema,
+  ConnectionEventIdSchema,
   EpisodeIdSchema,
   ExtensionIdSchema,
   ExtensionRevisionIdSchema,
   HostApiContracts,
   HostUiPageInstanceIdSchema,
   OutboundIntentIdSchema,
+  PlatformIdentityIdSchema,
 } from '@nekro-nxt/contracts'
 
 const targetAgentId = AgentIdSchema.parse('agt_targetinternalid')
@@ -24,9 +26,9 @@ const targetRevisionId = AgentRevisionIdSchema.parse('arev_targetinternal')
 const sourceRevisionId = AgentRevisionIdSchema.parse('arev_sourceinternal')
 const targetChannelId = ChannelIdSchema.parse('chn_target')
 const sourceChannelId = ChannelIdSchema.parse('chn_source')
-const qqChannelId = ChannelIdSchema.parse('chn_qq')
-const webConnectionId = ConnectionIdSchema.parse('con_web')
-const qqConnectionId = ConnectionIdSchema.parse('con_qq')
+const externalChannelId = ChannelIdSchema.parse('chn_external')
+const internalConnectionId = ConnectionIdSchema.parse('con_internal')
+const externalConnectionId = ConnectionIdSchema.parse('con_external')
 const summaryExtensionId = ExtensionIdSchema.parse('ext_summary')
 const summaryRevisionId = ExtensionRevisionIdSchema.parse('xrv_summary')
 const dashboardExtensionId = ExtensionIdSchema.parse('ext_dashboard')
@@ -39,10 +41,10 @@ const previewAuthoringAttemptId = AuthoringAttemptIdSchema.parse('aua_PREVIEWPRO
 const saveAuthoringTaskId = AuthoringTaskIdSchema.parse('aut_SAVEPROBE')
 const saveAuthoringAttemptId = AuthoringAttemptIdSchema.parse('aua_SAVEPROBE')
 const visibleEventId = ChannelEventIdSchema.parse('evt_visible')
-const qqEventId = ChannelEventIdSchema.parse('evt_qqvisible')
-const qqSystemEventId = ChannelEventIdSchema.parse('evt_qqsystem')
-const qqCardEventId = ChannelEventIdSchema.parse('evt_qqcardmsg')
-const qqImageEventId = ChannelEventIdSchema.parse('evt_qqimagemsg')
+const externalEventId = ChannelEventIdSchema.parse('evt_externalvisible')
+const externalSystemEventId = ChannelEventIdSchema.parse('evt_externalsystem')
+const externalCardEventId = ChannelEventIdSchema.parse('evt_externalcard')
+const externalImageEventId = ChannelEventIdSchema.parse('evt_externalimage')
 const sentEventId = ChannelEventIdSchema.parse('evt_sent')
 const resourceIntentId = OutboundIntentIdSchema.parse('out_resources')
 const senderMemberId = ChannelMemberIdSchema.parse('mbr_sender')
@@ -76,6 +78,18 @@ const imageDiagnostics = {
   blockers: [],
 }
 const fileAssetId = AssetIdSchema.parse('ast_file')
+const connectionActorId = PlatformIdentityIdSchema.parse('pid_VISUALACTOR')
+const connectionSubjectId = PlatformIdentityIdSchema.parse('pid_VISUALSUBJECT')
+const connectionEvents = Array.from({ length: 35 }, (_, index) => ({
+  id: ConnectionEventIdSchema.parse(`cev_VISUAL${String(index + 1).padStart(2, '0')}`),
+  connectionId: externalConnectionId,
+  activityKey: 'account-signal',
+  summary:
+    index === 0 ? '账号资料收到一条较长的连接活动摘要，用于确认较多事实仍保持紧凑可读。' : `连接活动 ${index + 1}`,
+  actor: { identityId: connectionActorId, displayName: '参与者甲' },
+  ...(index % 2 === 0 ? { subject: { identityId: connectionSubjectId, displayName: '相关对象乙' } } : {}),
+  occurredAt: 1_725_000_100_000 - index * 1_000,
+}))
 
 const productSnapshot = HostApiContracts.snapshot.response.parse({
   productMetadata: {
@@ -106,30 +120,36 @@ const productSnapshot = HostApiContracts.snapshot.response.parse({
   },
   connectionAdapters: [
     {
-      key: 'web',
+      key: 'fixture-alpha',
       displayName: '内置频道',
       description: '内置频道',
-      userCreatable: false,
+      provisioning: 'system-singleton',
+      channelKinds: ['internal'],
+      activities: [],
+      features: {},
       aliasEditable: false,
       channelDiscovery: 'host-created',
       diagnostics: { receive: false, send: false },
       configSchema: { schemaVersion: 1, type: 'object', required: [], properties: {} },
     },
     {
-      key: 'qq-openclaw',
-      displayName: 'QQ 官方机器人',
-      description: '连接 QQ 机器人账号',
-      userCreatable: true,
+      key: 'fixture-beta',
+      displayName: '示例群聊平台',
+      description: '连接示例平台账号',
+      provisioning: 'user-created',
+      channelKinds: ['direct', 'group'],
+      activities: [],
+      features: {},
       aliasEditable: true,
       channelDiscovery: 'adapter-observed',
       diagnostics: { receive: true, send: true },
       configSchema: {
         schemaVersion: 1,
         type: 'object',
-        required: ['appId', 'clientSecret'],
+        required: ['accountCode', 'secret'],
         properties: {
-          appId: { type: 'string', title: 'App ID' },
-          clientSecret: { type: 'credential-reference', title: 'Client Secret' },
+          accountCode: { type: 'string', title: '账号代码' },
+          secret: { type: 'credential-reference', title: '访问密钥' },
           markdown: { type: 'boolean', title: '使用 Markdown', description: '允许发送 Markdown 消息。', default: true },
         },
       },
@@ -207,9 +227,9 @@ const productSnapshot = HostApiContracts.snapshot.response.parse({
   channels: [
     {
       id: targetChannelId,
-      connectionId: webConnectionId,
+      connectionId: internalConnectionId,
       platformChannelId: 'platform-target',
-      kind: 'web',
+      kind: 'internal',
       displayName: '资料员的内置频道',
       boundAgentId: targetAgentId,
       bindings: [
@@ -218,9 +238,9 @@ const productSnapshot = HostApiContracts.snapshot.response.parse({
     },
     {
       id: sourceChannelId,
-      connectionId: webConnectionId,
+      connectionId: internalConnectionId,
       platformChannelId: 'platform-source',
-      kind: 'web',
+      kind: 'internal',
       displayName: '记录员的内置频道',
       boundAgentId: sourceAgentId,
       bindings: [
@@ -228,9 +248,9 @@ const productSnapshot = HostApiContracts.snapshot.response.parse({
       ],
     },
     {
-      id: qqChannelId,
-      connectionId: qqConnectionId,
-      platformChannelId: 'group:opaqueidab12',
+      id: externalChannelId,
+      connectionId: externalConnectionId,
+      platformChannelId: 'opaque-group-alpha',
       kind: 'group',
       displayName: '产品讨论群',
       bindings: [],
@@ -239,26 +259,31 @@ const productSnapshot = HostApiContracts.snapshot.response.parse({
   messages: [],
   connections: [
     {
-      id: webConnectionId,
-      adapterKey: 'web',
-      appId: '',
-      proactiveSend: false,
-      credentialConfigured: true,
+      id: internalConnectionId,
+      adapterKey: 'fixture-alpha',
+      status: { state: 'connected', proactiveSend: false, credentialConfigured: true, activities: {} },
       channelCount: 2,
       knownChannels: [],
     },
     {
-      id: qqConnectionId,
-      adapterKey: 'qq-openclaw',
-      appId: '12345678',
-      proactiveSend: false,
-      credentialConfigured: true,
+      id: externalConnectionId,
+      adapterKey: 'fixture-beta',
+      status: {
+        state: 'connected',
+        proactiveSend: false,
+        credentialConfigured: true,
+        accountReference: '示例账号',
+        activities: {},
+      },
       channelCount: 1,
-      knownChannels: [{ id: qqChannelId, name: 'group:opaqueidab12', kind: 'group' }],
-      gateway: { state: 'connected' },
-      lastInbound: { channelId: qqChannelId, platformMessageId: 'qq-inbound', receivedAt: 1_725_000_010_000 },
-      receiveTest: { status: 'received', channelId: qqChannelId, platformMessageId: 'qq-inbound' },
-      sendTest: { status: 'sent', channelId: qqChannelId, platformMessageId: 'qq-outbound' },
+      knownChannels: [{ id: externalChannelId, name: '产品讨论群', kind: 'group' }],
+      lastInbound: {
+        channelId: externalChannelId,
+        platformMessageId: 'fixture-inbound',
+        receivedAt: 1_725_000_010_000,
+      },
+      receiveTest: { status: 'received', channelId: externalChannelId, platformMessageId: 'fixture-inbound' },
+      sendTest: { status: 'sent', channelId: externalChannelId, platformMessageId: 'fixture-outbound' },
     },
   ],
   extensions: [
@@ -320,8 +345,8 @@ const channelMessages = HostApiContracts.listChannelMessages.response.parse({
       occurredAt: 1_725_000_000_000,
     },
     {
-      id: qqEventId,
-      channelId: qqChannelId,
+      id: externalEventId,
+      channelId: externalChannelId,
       role: 'member',
       sender: { memberId: senderMemberId, displayName: '成员甲' },
       mentionedConnectionAccount: true,
@@ -334,11 +359,11 @@ const channelMessages = HostApiContracts.listChannelMessages.response.parse({
       occurredAt: 1_725_000_010_000,
     },
     {
-      id: qqSystemEventId,
-      channelId: qqChannelId,
+      id: externalSystemEventId,
+      channelId: externalChannelId,
       role: 'system',
       sender: { memberId: senderMemberId, displayName: '成员甲' },
-      activityType: 'member-joined',
+      activityKey: 'member-joined',
       parts: [
         { type: 'mention', memberId: senderMemberId, displayName: '新成员' },
         { type: 'text', text: ' 受 ' },
@@ -348,27 +373,27 @@ const channelMessages = HostApiContracts.listChannelMessages.response.parse({
       occurredAt: 1_725_000_012_000,
     },
     {
-      id: qqCardEventId,
-      channelId: qqChannelId,
+      id: externalCardEventId,
+      channelId: externalChannelId,
       role: 'member',
       sender: { memberId: senderMemberId, displayName: '成员甲' },
       parts: [
         {
           type: 'rich',
-          adapterKey: 'qq-openclaw',
+          adapterKey: 'fixture-beta',
           kind: 'miniapp',
           summary: '示例来源 · 示例分享',
           title: '示例分享',
           source: '示例来源',
-          targetUrl: 'https://example.test/share/qq-card',
+          targetUrl: 'https://example.test/share/fixture-card',
           previewAssetId: imageAssetId,
         },
       ],
       occurredAt: 1_725_000_015_000,
     },
     {
-      id: qqImageEventId,
-      channelId: qqChannelId,
+      id: externalImageEventId,
+      channelId: externalChannelId,
       role: 'member',
       sender: { memberId: senderMemberId, displayName: '成员甲' },
       parts: [{ type: 'image', assetId: imageAssetId, alt: '讨论截图' }],
@@ -459,6 +484,17 @@ const installProductRoutes = async (page: Page): Promise<void> => {
       body: JSON.stringify({ messages, hasMore: false }),
     })
   })
+  await page.route('**/api/connections/*/events?*', (route) => {
+    const url = new URL(route.request().url())
+    const connectionId = url.pathname.split('/')[3]
+    const older = url.searchParams.has('beforeId')
+    const events = connectionId === externalConnectionId ? connectionEvents.slice(older ? 30 : 0, older ? 35 : 30) : []
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ events, hasMore: connectionId === externalConnectionId && !older }),
+    })
+  })
   await page.route('**/api/dynamic/*/inventory', (route) =>
     route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ rows: [] }) }),
   )
@@ -472,11 +508,11 @@ const installProductRoutes = async (page: Page): Promise<void> => {
       displayName:
         index === 0 ? '成员甲' : index === 1 ? '一位名称很长但仍需要保持行布局稳定的平台成员' : `示例成员 ${index + 1}`,
       adapter: {
-        key: index < 9 ? 'qq-openclaw' : 'web',
-        displayName: index < 9 ? 'QQ 官方机器人' : '内置频道',
+        key: index < 9 ? 'fixture-beta' : 'fixture-alpha',
+        displayName: index < 9 ? '示例群聊平台' : '内置频道',
       },
       connection: {
-        id: index < 9 ? qqConnectionId : webConnectionId,
+        id: index < 9 ? externalConnectionId : internalConnectionId,
         displayName: index < 9 ? '社群运营账号' : '当前设备',
       },
       activeChannelCount: index === 11 ? 0 : (index % 4) + 1,
@@ -484,9 +520,9 @@ const installProductRoutes = async (page: Page): Promise<void> => {
         index === 11
           ? []
           : [
-              { id: qqChannelId, displayName: '产品讨论群', kind: 'group' as const },
+              { id: externalChannelId, displayName: '产品讨论群', kind: 'group' as const },
               ...(index % 2 === 0
-                ? [{ id: targetChannelId, displayName: '资料员的内置频道', kind: 'web' as const }]
+                ? [{ id: targetChannelId, displayName: '资料员的内置频道', kind: 'internal' as const }]
                 : []),
             ],
       historicalOnly: index === 11,
@@ -505,12 +541,12 @@ const installProductRoutes = async (page: Page): Promise<void> => {
         items,
         facets: {
           adapters: [
-            { key: 'qq-openclaw', displayName: 'QQ 官方机器人', userCount: 9 },
-            { key: 'web', displayName: '内置频道', userCount: 3 },
+            { key: 'fixture-beta', displayName: '示例群聊平台', userCount: 9 },
+            { key: 'fixture-alpha', displayName: '内置频道', userCount: 3 },
           ],
           connections: [
-            { id: qqConnectionId, adapterKey: 'qq-openclaw', displayName: '社群运营账号', userCount: 9 },
-            { id: webConnectionId, adapterKey: 'web', displayName: '当前设备', userCount: 3 },
+            { id: externalConnectionId, adapterKey: 'fixture-beta', displayName: '社群运营账号', userCount: 9 },
+            { id: internalConnectionId, adapterKey: 'fixture-alpha', displayName: '当前设备', userCount: 3 },
           ],
         },
       }),
@@ -594,17 +630,44 @@ test('writes the four public product screenshots from fictional production data'
 
   await page.goto('/connections')
   await page
-    .getByRole('link', { name: /QQ 官方机器人/u })
+    .getByRole('link', { name: /示例群聊平台/u })
     .first()
     .click()
-  await expect(page).toHaveURL(new RegExp(`/connections/${qqConnectionId}$`, 'u'))
+  await expect(page).toHaveURL(new RegExp(`/connections/${externalConnectionId}$`, 'u'))
   await expectProductMotionSettled(page)
-  await expect(page.locator('main').getByRole('heading', { name: 'QQ 官方机器人' })).toBeVisible()
+  await expect(page.locator('main').getByRole('heading', { name: '示例群聊平台' })).toBeVisible()
   await page.screenshot({ path: `${outputDirectory}/connections.png`, animations: 'disabled' })
 
   await page.goto('/work/creator')
   await expect(page.getByText('与资料员协作创造', { exact: true })).toBeVisible()
   await page.screenshot({ path: `${outputDirectory}/creator-workbench.png`, animations: 'disabled' })
+  expect(failures, failures.join('\n')).toEqual([])
+})
+
+test('connection activity updates live without entering channel settings', async ({ page }, testInfo) => {
+  const failures = installRuntimeFailureGate(page)
+  await installProductRoutes(page)
+  const liveEvent = {
+    id: ConnectionEventIdSchema.parse('cev_LIVEVISUAL'),
+    connectionId: externalConnectionId,
+    activityKey: 'account-signal',
+    summary: '实时收到连接级活动',
+    actor: { identityId: connectionActorId, displayName: '参与者甲' },
+    occurredAt: 1_725_000_200_000,
+  }
+  await page.route('**/api/events', (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: 'text/event-stream',
+      body: `event: connection-fact\ndata: ${JSON.stringify(liveEvent)}\n\n`,
+    }),
+  )
+
+  await page.goto(`/connections/${externalConnectionId}`)
+  await expect(page.getByText('实时收到连接级活动')).toBeVisible()
+  await expect(page.getByText('参与者：参与者甲')).toBeVisible()
+  await expect(page.getByRole('button', { name: '加载连接活动' })).toHaveCount(0)
+  await capture(page, testInfo, 'fixture-connection-live-activity')
   expect(failures, failures.join('\n')).toEqual([])
 })
 
@@ -1066,8 +1129,8 @@ test('platform-user updates stay local while persona references use the shared m
       return { x: rect.x, y: rect.y, width: rect.width, height: rect.height }
     })
   })
-  await page.getByRole('link', { name: /QQ 官方机器人/u }).click()
-  await expect(page.getByText('QQ 官方机器人 · 9 位用户', { exact: true })).toBeVisible()
+  await page.getByRole('link', { name: /示例群聊平台/u }).click()
+  await expect(page.getByText('示例群聊平台 · 9 位用户', { exact: true })).toBeVisible()
   await expect(page.locator('[data-product-page="users"] [data-stage-layer]')).toHaveCount(0)
   const stableChromeAfter = await page.evaluate(() => {
     const toolbar = document.querySelector<HTMLElement>('[data-page-toolbar]')!
@@ -1556,7 +1619,7 @@ test('group conversations preserve sender and Mention semantics without exposing
   const failures = installRuntimeFailureGate(page)
   await installProductRoutes(page)
   await page.setViewportSize({ width: 1440, height: 900 })
-  await page.goto(`/work/channels/${qqChannelId}`)
+  await page.goto(`/work/channels/${externalChannelId}`)
 
   await expect(page.getByText('成员甲', { exact: true }).first()).toBeVisible()
   await expect(page.getByText('@机器人账号', { exact: true })).toBeVisible()
@@ -1574,7 +1637,7 @@ test('group conversations preserve sender and Mention semantics without exposing
   const systemEvent = page.locator('[data-activity-type="member-joined"]')
   await expect(mentionMessage).not.toHaveAttribute('data-bubbleless', '')
   await expect(richMessage).toHaveAttribute('data-bubbleless', '')
-  await expect(richCardLink).toHaveAttribute('href', 'https://example.test/share/qq-card')
+  await expect(richCardLink).toHaveAttribute('href', 'https://example.test/share/fixture-card')
   await expect(richCardLink).toHaveAttribute('target', '_blank')
   await expect(richCardLink.getByRole('img', { name: '示例分享' })).toBeVisible()
   await expect(richMessage.getByRole('button')).toHaveCount(0)
@@ -1595,7 +1658,7 @@ test('group conversations preserve sender and Mention semantics without exposing
   expect(visibleText).not.toContain(targetMemberId)
   expect(visibleText).not.toContain('group:opaqueidab12')
   await assertViewportIntegrity(page)
-  await capture(page, testInfo, 'qq-group-member-mentions')
+  await capture(page, testInfo, 'fixture-group-member-mentions')
   expect(failures, failures.join('\n')).toEqual([])
 })
 
@@ -1735,11 +1798,16 @@ test('redesigned relationship and lifecycle pages stay legible across representa
 
   await page.goto('/connections')
   await page
-    .getByRole('link', { name: /QQ 官方机器人/u })
+    .getByRole('link', { name: /示例群聊平台/u })
     .first()
     .click()
   await expect(page.locator('[data-stage-layer="out"]')).toHaveCount(0)
   await expect(page.locator('[data-stage-layer="in"]').last()).toHaveCSS('opacity', '1')
+  await page.getByRole('button', { name: '加载连接活动' }).click()
+  await expect(page.getByText('账号资料收到一条较长的连接活动摘要，用于确认较多事实仍保持紧凑可读。')).toBeVisible()
+  await expect(page.getByText('参与者：参与者甲 · 相关对象：相关对象乙').first()).toBeVisible()
+  await page.getByRole('button', { name: '加载更早活动' }).click()
+  await expect(page.getByText('连接活动 35')).toBeVisible()
   const optionalTests = page.getByRole('button', { name: '收发测试' })
   await expect(optionalTests).toHaveAttribute('aria-expanded', 'false')
   const aliasInput = page.getByLabel('辨识名')
@@ -1766,13 +1834,12 @@ test('redesigned relationship and lifecycle pages stay legible across representa
   })
   expect(Math.abs(scrollGeometry.rootRight - scrollGeometry.stageRight)).toBeLessThanOrEqual(1)
   expect(scrollGeometry.overflowY).toBe('auto')
-  await capture(page, testInfo, 'redesign-connection-qq-tests-collapsed-light')
+  await capture(page, testInfo, 'redesign-connection-fixture-tests-collapsed-light')
   await optionalTests.click()
-  await expect(page.getByText('群聊（尾号 ab12）')).toBeVisible()
+  await expect(page.getByText('产品讨论群 · 群聊')).toBeVisible()
   const connectionText = await page.locator('body').innerText()
-  expect(connectionText).not.toContain('group:opaqueidab12')
-  expect(connectionText).not.toContain('群聊（尾号 ab12） · 群聊')
-  await capture(page, testInfo, 'redesign-connection-qq-light')
+  expect(connectionText).not.toContain('opaque-group-alpha')
+  await capture(page, testInfo, 'redesign-connection-fixture-light')
 
   await page.unroute('**/api/snapshot')
   await page.route('**/api/snapshot', (route) =>
@@ -2893,7 +2960,7 @@ test('the creation page reuses the editor structure and submits explicit capabil
       body: JSON.stringify({
         agentId: AgentIdSchema.parse('agt_created'),
         channelId: targetChannelId,
-        connectionId: webConnectionId,
+        connectionId: internalConnectionId,
       }),
     })
   })
@@ -3343,7 +3410,7 @@ test('an initial Host failure is explicit and can recover without reloading', as
   healthy = true
   await page.getByRole('button', { name: '重新连接' }).last().click()
   await expect(page.getByText('无法连接', { exact: true }).first()).toBeHidden()
-  await expect(page.getByRole('link', { name: /QQ 官方机器人/u }).first()).toBeVisible()
+  await expect(page.getByRole('link', { name: /示例群聊平台/u }).first()).toBeVisible()
   await page.goto(`/work/channels/${targetChannelId}`)
   const messageEmpty = page.locator('[data-empty-state]').filter({ hasText: '还没有消息' })
   await expect(messageEmpty).toBeVisible()

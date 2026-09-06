@@ -19,7 +19,7 @@ export const resolveMessageSide = (input: {
   readonly origin?: ConversationMessage['origin']
 }): MessageSide => {
   if (input.role === 'system') return 'system'
-  if (input.channelKind === 'web') return input.role === 'member' ? 'right' : 'left'
+  if (input.channelKind === 'internal') return input.role === 'member' ? 'right' : 'left'
   return input.role === 'member' ? 'left' : 'right'
 }
 

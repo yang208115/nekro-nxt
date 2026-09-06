@@ -78,6 +78,7 @@
     "@nekro-nxt/adapter-qq-openclaw": "workspace:*",
     "@nekro-nxt/adapter-onebot-11": "workspace:*",
     "@nekro-nxt/adapter-sdk": "workspace:*",
+    "@nekro-nxt/adapter-wechat-ilink": "workspace:*",
     "@nekro-nxt/adapter-web": "workspace:*",
     "@nekro-nxt/channel-runtime": "workspace:*",
     "@nekro-nxt/contracts": "workspace:*",

@@ -206,25 +206,40 @@ const projectAdapterProperty = (
   }
 }
 
+const projectAdapterCreation = (
+  creation: SnapshotJson['connectionAdapters'][number]['creation'],
+): AdapterConnectionDescriptor['creation'] | undefined => {
+  if (creation === undefined) return undefined
+  return {
+    mode: creation.mode,
+    ...(creation.actionLabel === undefined ? {} : { actionLabel: creation.actionLabel }),
+    ...(creation.pendingLabel === undefined ? {} : { pendingLabel: creation.pendingLabel }),
+  }
+}
+
 const projectAdapterDescriptor = (
   descriptor: SnapshotJson['connectionAdapters'][number],
-): AdapterConnectionDescriptor => ({
-  key: descriptor.key,
-  displayName: descriptor.displayName,
-  description: descriptor.description,
-  userCreatable: descriptor.userCreatable,
-  configSchema: {
-    schemaVersion: descriptor.configSchema.schemaVersion,
-    type: 'object',
-    required: descriptor.configSchema.required,
-    properties: Object.fromEntries(
-      Object.entries(descriptor.configSchema.properties).map(([key, property]) => [
-        key,
-        projectAdapterProperty(property),
-      ]),
-    ),
-  },
-})
+): AdapterConnectionDescriptor => {
+  const creation = projectAdapterCreation(descriptor.creation)
+  return {
+    key: descriptor.key,
+    displayName: descriptor.displayName,
+    description: descriptor.description,
+    userCreatable: descriptor.userCreatable,
+    ...(creation === undefined ? {} : { creation }),
+    configSchema: {
+      schemaVersion: descriptor.configSchema.schemaVersion,
+      type: 'object',
+      required: descriptor.configSchema.required,
+      properties: Object.fromEntries(
+        Object.entries(descriptor.configSchema.properties).map(([key, property]) => [
+          key,
+          projectAdapterProperty(property),
+        ]),
+      ),
+    },
+  }
+}
 
 const platformChannelLabel = (platformChannelId: string, kind: 'group' | 'direct' = 'group'): string => {
   const suffix = platformChannelId.trim().match(/([\p{L}\p{N}]{4})$/u)?.[1]
@@ -444,6 +459,10 @@ const projectSnapshot = (json: SnapshotJson, successfulAt: number): ProductSnaps
     const adapterName = connectionAdapterName(connection)
     const descriptor = json.connectionAdapters.find(({ key }) => key === connection.adapterKey)
     const gatewayState = connection.gateway?.state ?? connection.status.state
+    const adapterSettings =
+      connection.adapterSettings?.wechatIlink === undefined
+        ? undefined
+        : { wechatIlink: connection.adapterSettings.wechatIlink }
     return {
       id: connection.id,
       ...(connection.alias === undefined ? {} : { alias: connection.alias }),
@@ -464,6 +483,7 @@ const projectSnapshot = (json: SnapshotJson, successfulAt: number): ProductSnaps
       gatewayState,
       lastError: connection.gateway?.lastError ?? connection.status.message ?? '',
       proactiveSend: connection.proactiveSend ?? connection.status.proactiveSend,
+      ...(adapterSettings === undefined ? {} : { adapterSettings }),
       channels: connection.channelCount ?? 0,
       knownChannels: (connection.knownChannels ?? []).map((channel) => ({
         ...channel,
@@ -880,12 +900,45 @@ export class HttpProductHost implements ProductHostPort {
       await this.#refreshAndNotify()
       return result
     }
+    if (command === 'connections.wechatIlinkLogin.start') {
+      const alias = typeof input?.['alias'] === 'string' ? input['alias'] : undefined
+      return await this.#call(
+        HostApiContracts.startWechatIlinkLogin,
+        {},
+        HostApiContracts.startWechatIlinkLogin.parseRequest({ ...(alias === undefined ? {} : { alias }) }),
+      )
+    }
+    if (command === 'connections.wechatIlinkLogin.get') {
+      const loginId = typeof input?.['loginId'] === 'string' ? input['loginId'] : ''
+      if (!loginId.trim()) throw new Error('缺少微信 iLink 登录会话，请重新扫码。')
+      const result = await this.#call(HostApiContracts.getWechatIlinkLogin, { loginId }, undefined)
+      if (result.status === 'confirmed') await this.#refreshAndNotify()
+      return result
+    }
+    if (command === 'connections.wechatIlinkLogin.cancel') {
+      const loginId = typeof input?.['loginId'] === 'string' ? input['loginId'] : ''
+      if (!loginId.trim()) return null
+      return await this.#call(HostApiContracts.cancelWechatIlinkLogin, { loginId }, undefined)
+    }
     if (command === 'connections.updateAlias') {
       const connectionId = typeof input?.['connectionId'] === 'string' ? input['connectionId'] : ''
       const alias = typeof input?.['alias'] === 'string' ? input['alias'] : undefined
       if (!connectionId.trim()) throw new Error('缺少连接标识，请刷新页面后重试。')
       if (alias === undefined) throw new Error('连接别名格式无效，请重新填写。')
       const result = await this.#call(HostApiContracts.updateConnectionAlias, { connectionId }, { alias })
+      await this.#refreshAndNotify()
+      return result
+    }
+    if (command === 'connections.wechatIlinkInboundMedia.update') {
+      const connectionId = typeof input?.['connectionId'] === 'string' ? input['connectionId'] : ''
+      const enableInboundMedia = input?.['enableInboundMedia']
+      if (!connectionId.trim()) throw new Error('缺少连接标识，请刷新页面后重试。')
+      if (typeof enableInboundMedia !== 'boolean') throw new Error('入站图片接收设置格式无效，请重新操作。')
+      const result = await this.#call(
+        HostApiContracts.updateWechatIlinkInboundMedia,
+        { connectionId },
+        { enableInboundMedia },
+      )
       await this.#refreshAndNotify()
       return result
     }

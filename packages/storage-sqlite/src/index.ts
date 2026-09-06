@@ -162,6 +162,8 @@ export class SqliteCoreRepository implements CurrentRepository {
     this.#channels.createConnection(...args)
   readonly updateConnectionAlias = (...args: Parameters<CoreRepository['updateConnectionAlias']>) =>
     this.#channels.updateConnectionAlias(...args)
+  readonly updateConnectionConfig = (...args: Parameters<CoreRepository['updateConnectionConfig']>) =>
+    this.#channels.updateConnectionConfig(...args)
   readonly getConnection = (...args: Parameters<CoreRepository['getConnection']>) =>
     this.#channels.getConnection(...args)
   readonly listConnectionIdsByAdapter = (...args: Parameters<CoreRepository['listConnectionIdsByAdapter']>) =>

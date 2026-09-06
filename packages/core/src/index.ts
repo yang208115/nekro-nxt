@@ -22,6 +22,7 @@ import {
   ChannelIdSchema,
   ChannelMemberIdSchema,
   ConnectionIdSchema,
+  JsonValueSchema,
   LogicalMessageIdSchema,
   messagePartAssetIds,
   messagePartsSearchText,
@@ -225,6 +226,7 @@ export interface CoreRepository {
   ): void
   createConnection(record: ConnectionRecord): void
   updateConnectionAlias(id: ConnectionId, alias?: string): void
+  updateConnectionConfig(id: ConnectionId, config: JsonValue): void
   getConnection(id: ConnectionId): ConnectionRecord | undefined
   listConnectionIdsByAdapter(adapterKey?: string): readonly ConnectionId[]
   createChannel(record: ChannelRecord): void
@@ -717,6 +719,14 @@ export class CoreService {
       }
     }
     return { ...current, alias: normalizedAlias }
+  }
+
+  updateConnectionConfig(connectionId: ConnectionId, config: JsonValue): ConnectionRecord {
+    const current = this.#repository.getConnection(connectionId)
+    if (!current) throw new Error(`Unknown connection: ${connectionId}`)
+    const parsedConfig = JsonValueSchema.parse(config)
+    this.#repository.updateConnectionConfig(connectionId, parsedConfig)
+    return { ...current, config: parsedConfig }
   }
 
   listConnections(): readonly ConnectionRecord[] {

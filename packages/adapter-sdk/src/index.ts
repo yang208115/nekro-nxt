@@ -231,7 +231,7 @@ type AdapterConnectionWireSchema = {
   readonly schemaVersion: number
   readonly type: 'object'
   readonly required: readonly string[]
-  readonly properties: Readonly<Record<string, AdapterConfigurationProperty>>
+  readonly properties: Readonly<Partial<Record<string, AdapterConfigurationProperty>>>
 }
 
 type AdapterConnectionProperties<
@@ -258,7 +258,15 @@ export type AdapterConnectionUiSchema<
     RequiredKeys<z.input<ConfigurationSchema>> | RequiredKeys<z.input<CredentialsSchema>>,
     string
   >[]
-  readonly properties: AdapterConnectionProperties<ConfigurationSchema, CredentialsSchema>
+  readonly properties: Partial<AdapterConnectionProperties<ConfigurationSchema, CredentialsSchema>>
+}
+
+export type AdapterConnectionCreationMode = 'schema-form' | 'qr-login'
+
+export interface AdapterConnectionCreationMetadata {
+  readonly mode: AdapterConnectionCreationMode
+  readonly actionLabel?: string
+  readonly pendingLabel?: string
 }
 
 /** Product-facing, versioned Connection setup metadata contributed by an Adapter. */
@@ -271,11 +279,9 @@ export type AdapterConnectionDescriptor<
   readonly description: string
   /** System-managed adapters remain visible for diagnostics but cannot be created by users. */
   readonly userCreatable: boolean
-  readonly configSchema: [ConfigurationSchema] extends [never]
-    ? AdapterConnectionWireSchema
-    : [CredentialsSchema] extends [never]
-      ? AdapterConnectionWireSchema
-      : AdapterConnectionUiSchema<ConfigurationSchema, CredentialsSchema>
+  /** Describes how the product should create this Connection. Defaults to schema-form. */
+  readonly creation?: AdapterConnectionCreationMetadata
+  readonly configSchema: AdapterConnectionWireSchema | AdapterConnectionUiSchema<ConfigurationSchema, CredentialsSchema>
 }
 
 export type AdapterConnectionCreator<Configuration, Credentials, Created> = (
@@ -307,17 +313,22 @@ export function defineAdapterConnection<
   readonly userCreatable: boolean
   readonly configurationSchema: ConfigurationSchema
   readonly credentialsSchema: CredentialsSchema
+  readonly creation?: AdapterConnectionCreationMetadata
   readonly configSchema: AdapterConnectionUiSchema<ConfigurationSchema, CredentialsSchema>
   readonly create: AdapterConnectionCreator<z.output<ConfigurationSchema>, z.output<CredentialsSchema>, Created>
 }): AdapterConnectionDefinition<Key, ConfigurationSchema, CredentialsSchema, Created> {
+  const descriptor: AdapterConnectionDefinition<Key, ConfigurationSchema, CredentialsSchema, Created>['descriptor'] = {
+    key: input.key,
+    displayName: input.displayName,
+    description: input.description,
+    userCreatable: input.userCreatable,
+    configSchema: input.configSchema,
+  }
+  if (input.creation !== undefined) {
+    Object.assign(descriptor, { creation: input.creation })
+  }
   return {
-    descriptor: {
-      key: input.key,
-      displayName: input.displayName,
-      description: input.description,
-      userCreatable: input.userCreatable,
-      configSchema: input.configSchema,
-    },
+    descriptor,
     configurationSchema: input.configurationSchema,
     credentialsSchema: input.credentialsSchema,
     create: input.create,
@@ -363,14 +374,14 @@ export function parseAdapterConnectionConfiguration<
   }
 
   const uiSchema: AdapterConnectionWireSchema = definition.descriptor.configSchema
-  const missingCredential = Object.entries(uiSchema.properties).find(
-    ([key, property]) =>
-      property.type === 'credential-reference' &&
+  for (const [key, property] of Object.entries(uiSchema.properties)) {
+    if (
+      property?.type === 'credential-reference' &&
       uiSchema.required.includes(key) &&
-      (typeof credentialInput[key] !== 'string' || credentialInput[key].trim().length === 0),
-  )
-  if (missingCredential) {
-    throw new TypeError(`请填写${missingCredential[1].title}。`)
+      (typeof credentialInput[key] !== 'string' || credentialInput[key].trim().length === 0)
+    ) {
+      throw new TypeError('请填写' + property.title + '。')
+    }
   }
   return {
     configuration: definition.configurationSchema.parse(configurationInput),

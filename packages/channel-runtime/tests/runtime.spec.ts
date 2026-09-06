@@ -152,6 +152,11 @@ class MemoryCoreRepository implements CoreRepository {
       this.connections.set(id, { ...current, alias })
     }
   }
+  updateConnectionConfig(id: ConnectionId, config: JsonValue): void {
+    const current = this.connections.get(id)
+    if (!current) throw new Error(`Unknown connection: ${id}`)
+    this.connections.set(id, { ...current, config })
+  }
   getConnection(id: ConnectionId) {
     return this.connections.get(id)
   }

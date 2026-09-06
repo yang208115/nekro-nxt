@@ -225,6 +225,11 @@ export interface ConnectionSummary {
   readonly gatewayState: string
   readonly lastError: string
   readonly proactiveSend: boolean
+  readonly adapterSettings?: {
+    readonly wechatIlink?: {
+      readonly enableInboundMedia: boolean
+    }
+  }
   readonly channels: number
   readonly knownChannels: readonly { readonly id: string; readonly name: string; readonly kind: string }[]
   readonly lastEvent: string
@@ -393,7 +398,11 @@ export interface ProductState {
     readonly credentials: Readonly<Record<string, string>>
     readonly alias?: string
   }): Promise<void>
+  startWechatIlinkLogin(input: { readonly alias?: string }): Promise<HostApiResponse<'startWechatIlinkLogin'>>
+  getWechatIlinkLogin(loginId: string): Promise<HostApiResponse<'getWechatIlinkLogin'>>
+  cancelWechatIlinkLogin(loginId: string): Promise<void>
   updateConnectionAlias(connectionId: string, alias: string): Promise<void>
+  updateWechatIlinkInboundMedia(connectionId: string, enableInboundMedia: boolean): Promise<void>
   workTreeOrder: {
     readonly agentIds: readonly string[]
     readonly channelIdsByAgent: Readonly<Record<string, readonly string[]>>
@@ -595,10 +604,33 @@ export const useProductStore = create<ProductState>((set) => ({
       credentials,
     })
   },
+  startWechatIlinkLogin: async ({ alias }) => {
+    const result = await requireHost().execute('connections.wechatIlinkLogin.start', {
+      ...(alias === undefined ? {} : { alias: alias.trim() }),
+    })
+    return HostApiContracts.startWechatIlinkLogin.parseResponse(result)
+  },
+  getWechatIlinkLogin: async (loginId) => {
+    const result = await requireHost().execute('connections.wechatIlinkLogin.get', {
+      loginId: requireValue(loginId, '缺少微信 iLink 登录会话，请重新扫码。'),
+    })
+    return HostApiContracts.getWechatIlinkLogin.parseResponse(result)
+  },
+  cancelWechatIlinkLogin: async (loginId) => {
+    await requireHost().execute('connections.wechatIlinkLogin.cancel', {
+      loginId: requireValue(loginId, '缺少微信 iLink 登录会话，请重新扫码。'),
+    })
+  },
   updateConnectionAlias: async (connectionId, alias) => {
     await requireHost().execute('connections.updateAlias', {
       connectionId: requireValue(connectionId, '缺少连接标识，请刷新页面后重试。'),
       alias: alias.trim(),
+    })
+  },
+  updateWechatIlinkInboundMedia: async (connectionId, enableInboundMedia) => {
+    await requireHost().execute('connections.wechatIlinkInboundMedia.update', {
+      connectionId: requireValue(connectionId, '缺少连接标识，请刷新页面后重试。'),
+      enableInboundMedia,
     })
   },
   createWebChannel: async ({ displayName }) => {

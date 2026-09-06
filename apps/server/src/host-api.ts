@@ -2,6 +2,10 @@ import type { WebServer, WebRoute } from '@deepseek-ai/dsh-host-webserver'
 import { isAdminConsoleOutbound, type ChannelFact, type ChannelHistoryEntry } from '@nekro-nxt/channel-runtime'
 import type { AgentRevisionContent, ImageUnderstandingPolicy } from '@nekro-nxt/core'
 import {
+  WECHAT_ILINK_CONNECTION_DEFINITION,
+  WechatIlinkConnectionConfigurationSchema,
+} from '@nekro-nxt/adapter-wechat-ilink'
+import {
   AgentIdSchema,
   AssetIdSchema,
   ChannelEventIdSchema,
@@ -626,6 +630,10 @@ export const createNekroHostApi = (
         .safeParse(connection.config)
       const diagnostic = runtime.connectionDiagnostic(connection.id)
       const adapterDiagnostic = runtime.adapterConnectionDiagnostic(connection.id)
+      const wechatIlinkConfig =
+        connection.adapterKey === WECHAT_ILINK_CONNECTION_DEFINITION.descriptor.key
+          ? WechatIlinkConnectionConfigurationSchema.safeParse(connection.config)
+          : undefined
       const gateway =
         diagnostic?.gateway ??
         (adapterDiagnostic === undefined
@@ -651,6 +659,9 @@ export const createNekroHostApi = (
             ? {}
             : { optionalCapabilities: adapterDiagnostic.optionalCapabilities }),
         },
+        ...(wechatIlinkConfig?.success
+          ? { adapterSettings: { wechatIlink: { enableInboundMedia: wechatIlinkConfig.data.enableInboundMedia } } }
+          : {}),
         channelCount: runtime.core.listChannelsByConnection(connection.id).length,
         knownChannels: runtime.core.listChannelsByConnection(connection.id).map((channel) => ({
           id: channel.id,
@@ -658,8 +669,16 @@ export const createNekroHostApi = (
           kind: channel.kind,
         })),
         ...(diagnostic?.lastInbound === undefined ? {} : { lastInbound: diagnostic.lastInbound }),
-        ...(diagnostic?.receiveTest === undefined ? {} : { receiveTest: diagnostic.receiveTest }),
-        ...(diagnostic?.sendTest === undefined ? {} : { sendTest: diagnostic.sendTest }),
+        ...(diagnostic?.receiveTest === undefined
+          ? adapterDiagnostic?.receiveTest === undefined
+            ? {}
+            : { receiveTest: adapterDiagnostic.receiveTest }
+          : { receiveTest: diagnostic.receiveTest }),
+        ...(diagnostic?.sendTest === undefined
+          ? adapterDiagnostic?.sendTest === undefined
+            ? {}
+            : { sendTest: adapterDiagnostic.sendTest }
+          : { sendTest: diagnostic.sendTest }),
       }
     })
     const webSearch = await runtime.host.getWebSearchCapabilityStatus()
@@ -2011,6 +2030,55 @@ export const createNekroHostApi = (
     },
   })
 
+  // POST/GET/DELETE /api/connections/wechat-ilink/login → Host-owned QR login.
+  // Users should only scan the platform QR code; protocol credentials stay inside the Host.
+  registerRoute({
+    kind: 'prefix',
+    path: '/api/connections/wechat-ilink/login',
+    handler: async (req, res) => {
+      const url = new URL(req.url ?? '/', 'http://localhost')
+      if (url.pathname === '/api/connections/wechat-ilink/login') {
+        if (req.method !== 'POST') {
+          writeError(res, 405, 'method-not-allowed', '只支持 POST。')
+          return
+        }
+        try {
+          const body = HostApiContracts.startWechatIlinkLogin.parseRequest(await readJsonBody(req))
+          writeContractJson(res, 201, HostApiContracts.startWechatIlinkLogin, await runtime.startWechatIlinkLogin(body))
+        } catch (error) {
+          writeError(res, 400, 'wechat-ilink-login-failed', error instanceof Error ? error.message : String(error))
+        }
+        return
+      }
+
+      const match = /^\/api\/connections\/wechat-ilink\/login\/([^/]+)$/u.exec(url.pathname)
+      if (!match?.[1]) {
+        writeError(res, 404, 'not-found', '未定义路由：' + req.method + ' ' + url.pathname + '。')
+        return
+      }
+      const loginId = decodeURIComponent(match[1])
+      try {
+        if (req.method === 'GET') {
+          const params = HostApiContracts.getWechatIlinkLogin.parseParams({ loginId })
+          writeContractJson(res, 200, HostApiContracts.getWechatIlinkLogin, runtime.getWechatIlinkLogin(params.loginId))
+          return
+        }
+        if (req.method === 'DELETE') {
+          const params = HostApiContracts.cancelWechatIlinkLogin.parseParams({ loginId })
+          const cancelled = runtime.cancelWechatIlinkLogin(params.loginId)
+          writeContractJson(res, 200, HostApiContracts.cancelWechatIlinkLogin, {
+            loginId: cancelled.loginId,
+            status: 'cancelled',
+          })
+          return
+        }
+        writeError(res, 405, 'method-not-allowed', '只支持 GET 或 DELETE。')
+      } catch (error) {
+        writeError(res, 400, 'wechat-ilink-login-failed', error instanceof Error ? error.message : String(error))
+      }
+    },
+  })
+
   // POST /api/connections/:id/test → honest send/receive diagnostics.
   registerRoute({
     kind: 'prefix',
@@ -2045,6 +2113,44 @@ export const createNekroHostApi = (
           })
         } catch (error) {
           writeError(res, 400, 'connection-alias-failed', error instanceof Error ? error.message : String(error))
+        }
+        return
+      }
+      const wechatIlinkInboundMediaMatch = /^\/api\/connections\/([^/]+)\/wechat-ilink\/inbound-media$/.exec(
+        url.pathname,
+      )
+      if (wechatIlinkInboundMediaMatch) {
+        if (req.method !== 'POST') {
+          writeError(res, 405, 'method-not-allowed', '只支持 POST。')
+          return
+        }
+        const encodedConnectionId = wechatIlinkInboundMediaMatch[1]
+        if (encodedConnectionId === undefined) {
+          writeError(res, 404, 'not-found', `未定义路由：${req.method} ${url.pathname}。`)
+          return
+        }
+        let connectionId: ReturnType<typeof ConnectionIdSchema.parse>
+        try {
+          connectionId = ConnectionIdSchema.parse(decodeURIComponent(encodedConnectionId))
+        } catch {
+          writeError(res, 400, 'invalid-connection', '无效的连接 ID。')
+          return
+        }
+        try {
+          const params = HostApiContracts.updateWechatIlinkInboundMedia.parseParams({ connectionId })
+          const body = HostApiContracts.updateWechatIlinkInboundMedia.parseRequest(await readJsonBody(req))
+          const updated = await runtime.updateWechatIlinkInboundMedia(params.connectionId, body.enableInboundMedia)
+          writeContractJson(res, 200, HostApiContracts.updateWechatIlinkInboundMedia, {
+            connectionId: updated.id,
+            enableInboundMedia: body.enableInboundMedia,
+          })
+        } catch (error) {
+          writeError(
+            res,
+            400,
+            'wechat-ilink-inbound-media-failed',
+            error instanceof Error ? error.message : String(error),
+          )
         }
         return
       }

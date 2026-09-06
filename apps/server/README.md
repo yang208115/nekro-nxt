@@ -24,7 +24,9 @@ Host UI 页面由独立 Runtime 承载。页面实例、显隐、跨扩展顺序
 
 持久 Extension Host factory 每个 Activation 执行一次并拥有 RPC；返回的 Cordis Plugin 只负责向该智能体的每个 Session 挂载 Tool Fiber。Client Artifact、Activation RPC 和最近一次加载诊断分别通过 Revision 精确路由；stale build、错误智能体和已停用 Revision 都被拒绝，Client 失败不回滚 Host Tool。
 
-生产入口在创建 `NekroRuntime` 前通过共享 `HostUpgradeCoordinator` 获取 `backups/upgrade.lock`，完成 preflight 和 Release 双 SQLite 备份，再以持久 journal 记录存储所有者打开与 Runtime 冷启动恢复；任一步失败都进入 `recovery` 并阻止 HTTP 就绪。`NekroRuntime.create()` 在挂载 DSH Session Provider 前验证 `sessions.sqlite` 所有权。schema 17 正常使用；DSH 0.1.0-rc.6 的 schema 15 先以 SQLite backup 归档到 `dsh/session-archives/<UTC>-schema15/`，再以 `incompatible-session-storage` 关闭旧 Episode 并释放未完成 Admission，由 rc.2 创建全新 schema 17 会话。归档含 SHA-256、版本与原路径，未知或外部数据库拒绝启动，NekroNXT 不修改 DSH 私有表也不自动删除归档。
+生产入口在创建 `NekroRuntime` 前通过共享 `HostUpgradeCoordinator` 获取 `backups/upgrade.lock`，完成 preflight 和 Release 双 SQLite 备份，再以持久 journal 记录存储所有者打开与 Runtime 冷启动恢复；任一步失败都进入 `recovery` 并阻止 HTTP 就绪。`NekroRuntime.create()` 在挂载 DSH Session Provider 前验证 `sessions.sqlite` 所有权。schema 17 正常使用；DSH 0.1.0-rc.6 的 schema 15 先归档到 `dsh/session-archives/<UTC>-schema15/`。归档前检查 application id 并执行 WAL checkpoint，SQLite backup 完成后校验快照 `quick_check`，发布成功才退休旧库。归档的 `manifest.json` 含 SHA-256、版本与原路径；未知 schema、外部 application id 和非空未版本化库拒绝启动，不修改 DSH 私有表。管理员确认新版本稳定后可转移或清理归档，系统不自动删除。
+
+归档成功后，Core 在同一事务中以 `incompatible-session-storage` 关闭全部 opening/active Episode，释放其 pending/claimed Admission；尚未写入旧 Session 的 Channel Event 可在下一条消息到来时进入新 Episode，由 rc.2 创建 schema 17 会话。已写入旧 Session 的频道事实、智能体 Revision、Binding、Asset 和 Extension Activation 均保留。
 
 每个根 Session 通过常驻系统提示和 `nekro_nxt_channel_context` 获得 Host 权威的 Channel/Episode 身份；发送、历史、Asset 与该只读工具都绑定当前频道。Episode handoff 只总结该 Episode 已准入的 Channel Event 与自身 Outbound，上一份派生 handoff、频道原文和智能体旧出站分区标注；最近 12 条频道原文仍作为独立恢复窗口注入。摘要请求不设置 `maxTokens`、使用 180 秒边界，任何摘要失败都降级且不阻断 rollover。
 
@@ -40,7 +42,7 @@ Compaction 使用 `NekroNxtCompactionEngine` 继承 DSH `BasicCompactionEngine`�
 
 DSH 0.1.1-rc.2 的 `frontend-static` 只服务真实文件和明确的 index 路径，未知路径返回 404。Server 因此为 NekroNXT 的产品页面前缀显式注册 SPA index 路由；`/api` 和不存在的 Asset 仍保持各自的 JSON/404 语义，不能用全局 index 回退掩盖错误路径。
 
-通用 DSH 配置面直接投影当前 Host：`GET /api/dsh/plugins` 返回固定生产 roster 的包身份、版本、来源和实时 Settings namespace，内置包不按运行验收或外部服务结果评级；`GET /api/dsh/settings` 返回所有可安全上线的脱敏 Settings descriptor。`agent-loop` 与 `shell` 等运行时 namespace 归入实际内置包，未知运行时注册项作为其他扩展显示。路径级修改走 `POST /api/dsh/settings/:namespace/mutate` 并强制 `expectedRevision`，凭据只通过 `describe`、`PUT` 和 `DELETE` 端点读状态或写入/清除，响应和日志不返回值。Settings/Credentials 提交事件通过同一 SSE 通知普通表单和 DSH 原生界面失效刷新。
+通用 DSH 配置面直接投影当前 Host：`GET /api/dsh/plugins` 返回固定生产 roster 的包身份、版本、来源和实时 Settings namespace，内置包不按运行验收或外部服务结果评级；`GET /api/dsh/settings` 返回所有可安全上线的脱敏 Settings descriptor。`agent-loop` 与 `shell` 等运行时 namespace 归入实际内置包，未知运行时注册项作为其他扩展显示。路径级修改走 `POST /api/dsh/settings/:namespace/mutate` 并强制 `expectedRevision`，凭据只通过 `describe`、`PUT` 和 `DELETE` 端点读状态或写入/清除，响应和日志不返回值。Settings/Credentials 提交事件通过同一 SSE 通知产品中的通用配置表单刷新；DSH 原生 WebUI 不接入。
 
 DSH 0.1.1-rc.2 的 `redactSecrets` 尚不能证明 union、intersect、transform、lazy 中 Secret 的线安全，序列化 schema 也可能携带 Secret default。因此 Server 在 descriptor 离开 Host 前做 fail-closed 检查：发现不受 0.1.1-rc.2 redactor 覆盖的 Secret 或 Secret default 时，不向 Web 暴露该 namespace，也拒绝通用 mutation；这不是提示词或表单层防护。待上游提供完备 `describeForWire()` 后再通过兼容 fixture 收敛此包装边界。
 
@@ -50,7 +52,15 @@ DSH 0.1.1-rc.2 的 `redactSecrets` 尚不能证明 union、intersect、transform
 
 DSH Settings 使用现有路径级 mutate 与 Credentials；普通 Cordis Config 优先序列化 Schema 表单，没有 Schema 时提供高级 JSON。Secret/credential-ref Config 拒绝持久化。DSH 原生 WebUI 不接入产品，`dsh.client` 只形成“原生界面未接入”提示。安装检查与提交使用进程内 Operation ID，通过 SSE 报告下载、依赖、构建脚本、校验和原子提交阶段。
 
-`dataRoot` 是 Server 唯一数据根，生产入口会创建 `dataRoot/workspaces/`，并在智能体首次使用开发 Shell 或文件工具时自动创建私有的 `workspaces/<agentId>/`。开发 Shell 的默认 `cwd` 和文件工具的默认 `cwd` 都使用该目录；`workspace-write` 只限制写入位置，DSH 0.1.1-rc.2 的 read/grep/glob 仍能读取 Server 进程有权读取的宿主文件，因此文件工具默认关闭且界面必须如实警示读取范围。完整文件访问只把已启用文件工具或开发 Shell 的策略提升为 `danger-full-access`，不会单独提供工具，也不改变默认 `cwd`。高级部署可用 `developmentWorkspaceRoot` 或 `NEKRO_DEVELOPMENT_WORKSPACE_ROOT` 覆盖工作区根，覆盖后仍自动追加 `<agentId>`。
+## 数据根与恢复边界
+
+生产容器使用 `/data`，本地由 `NEKRO_DATA` 或宿主参数指定数据根。组合根当前管理 `core.sqlite`、`sessions.sqlite`、`assets/`、`credentials/`、`dsh/`、`extension-data/`、`extension-cache/`、`workspaces/`、`backups/` 和公开入口的 `host/tls/`。Core 与 DSH 分别拥有数据库格式；Asset Service、本地凭据存储、DSH 服务、Extension Runtime、工作区和 Host 升级/安全入口各自拥有对应目录。`extension-cache/` 与 `dsh/request-images/` 可重建；扩展源码、Spill、工作区和凭据是持久数据，不能按缓存清理。
+
+SQLite 的 `-wal`、`-shm` 是运行期伴生文件，不是独立数据分区，不得手工移动或删除。`backups/` 中的 Release 恢复点当前只覆盖双 SQLite；完整备份与恢复操作见[升级、备份与恢复](../../docs/guide/upgrade-backup.md)。扩大自动恢复覆盖面时，必须同时定义资源、凭据、扩展源码、Spill 和工作区的恢复顺序、空间预算与崩溃 fixture。
+
+新增顶层项必须记录唯一所有者、当前消费者及持久/缓存和恢复语义；现有布局归并需作为有迁移、备份与恢复验证的独立任务，不能随局部功能静默搬移用户数据。测试使用临时根或本地专用分区，不写常驻 `data/`。`data/` 及其中的工作区副本不属于产品源码，ESLint、Prettier 和类型检查 include 必须排除；公开边界检查禁止 Git 跟踪该目录，不把未跟踪运行产物按产品源码扫描。
+
+`dataRoot` 是 Server 唯一数据根，生产入口会创建 `dataRoot/workspaces/`，并在智能体首次使用开发 Shell 或文件工具时自动创建私有的 `workspaces/<agentId>/`。开发 Shell 的默认 `cwd` 和文件工具的默认 `cwd` 都使用该目录；`workspace-write` 只限制写入位置，DSH 0.1.1-rc.2 的 read/grep/glob 仍能读取 Server 进程有权读取的宿主文件，因此文件工具默认关闭且界面必须如实警示读取范围。完整文件访问只把已启用文件工具或开发 Shell 的策略提升为 `danger-full-access`，不会单独提供工具，也不改变默认 `cwd`。Host 的 Authoring Attempt 源码固定写入 `workspaces/<agentId>/authoring/<taskId>/attempts/<attemptId>/`，按需创建私有目录；这项 Host 写入不授予智能体文件工具、Shell 或宿主路径访问。高级部署可用 `developmentWorkspaceRoot` 或 `NEKRO_DEVELOPMENT_WORKSPACE_ROOT` 覆盖工作区根，覆盖后仍自动追加 `<agentId>`。
 
 Spill 由 Server 自有的 DSH `SpillStore` 实现写入 `dataRoot/dsh/spill/`，单 artifact 8 MiB、单 Session 64 MiB、Host 总量 2 GiB；每次写入串行核算，重启后重新扫描现有文件。该目录是持久备份数据，不是 Asset 或 Adapter 路径身份。关闭文件工具后已有 locator 仍有效，但智能体不能自行回读，界面与模型提示会要求先重新授权文件工具。
 

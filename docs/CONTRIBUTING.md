@@ -16,7 +16,7 @@ pnpm install --frozen-lockfile
 pnpm dev
 ```
 
-开始修改前阅读 [`AGENTS.md`](../AGENTS.md)，再从[文档入口](README.md)进入对应产品、协议、Decision 和包 README。面向用户只使用“智能体”；内部类型可以保留 `AgentDefinition` 等 DSH/TypeScript 术语。
+遵循 [`AGENTS.md`](../AGENTS.md) 的项目边界；已知局部问题直接进入相关源码、测试和契约，未知来源通过[文档入口](README.md)定位相关章节。面向用户只使用“智能体”；内部类型可以保留 `AgentDefinition` 等 DSH/TypeScript 术语。
 
 ## 修改原则
 
@@ -29,17 +29,9 @@ pnpm dev
 
 ## 验证
 
-至少运行与改动相关的最窄检查。提交前的完整入口是：
+按[检查阶梯](06-开发与测试规范.md#6-检查阶梯)选择与改动相关且足够的验证。局部 Web 改动运行生产构建下受影响的旅程并查看真实画面；共享壳层和全局状态变更扩大覆盖。独立历史问题单独报告，不自动扩展修改范围。
 
-```bash
-pnpm check
-pnpm test
-pnpm test:coverage
-pnpm build
-pnpm test:journey
-```
-
-`pnpm test:coverage` 不包含在 `check` 或 `test` 中，统计范围和阈值以[开发与测试规范](06-开发与测试规范.md#覆盖率门禁)为准。用户可见 Web 改动必须补充生产构建产品旅程和真实像素视觉验收；平台安装资源还需运行 `pnpm brand:check` 并检查真实安装器画面。
+`pnpm verify:product` 用于完整产品交付复核，CI 保留全量门禁。`pnpm test:coverage` 不包含在 `check` 或 `test` 中，推送前的适用范围和阈值见[覆盖率门禁](06-开发与测试规范.md#覆盖率门禁)。平台安装资源还需运行 `pnpm brand:check` 并检查真实安装器画面。
 
 ## Pull Request
 
@@ -47,7 +39,7 @@ pnpm test:journey
 
 - 标题和提交说明使用英文类型前缀和中文主题，格式为 `type(scope): 中文动词短语`；类型使用 `feat`、`fix`、`refactor`、`docs`、`test`、`merge`；
 - 说明用户可观察到的结果、验证命令和文档更新；
-- UI 改动附浅色/深色真实截图；
+- UI 改动说明实际查看的画面与状态；颜色、表面或对比变化附浅色/深色截图，其他改动附受影响的代表画面；
 - 不混入无关格式化、重命名或生成文件；
 - 外部贡献通过 PR 和 CI，维护者在合并前可能要求拆分范围。
 

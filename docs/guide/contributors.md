@@ -16,24 +16,13 @@ Web 默认监听 `http://127.0.0.1:4961`，并代理本地 Server `127.0.0.1:496
 
 ## 从哪里读
 
-1. 根 `AGENTS.md`：产品铁律、术语、生命周期和完成条件；
-2. `docs/README.md`：公开知识路由；
-3. `apps/README.md` 或 `packages/README.md`：代码所有者与消费者；
-4. 对应协议、Decision 和包 README。
-
-前端改动还需阅读术语、桌面 UI、界面交互模型和产品旅程文档。消息、Channel 或 Adapter 改动需阅读消息投递协议和对应 Decision。
+根 [`AGENTS.md`](../../AGENTS.md) 保存项目边界。已知局部修复可直接读相关实现、测试和契约章节；未知来源从[公开索引](../README.md)、[Apps](../../apps/README.md) 或 [Packages](../../packages/README.md) 定位。前端按影响查术语、设计和交互模型，改变用户路径再查产品旅程；消息或 Adapter 变化核对对应消息契约。
 
 ## 验证
 
-```bash
-pnpm check
-pnpm test
-pnpm test:coverage
-pnpm build
-pnpm test:journey
-```
+[开发规范的检查阶梯](../06-开发与测试规范.md#6-检查阶梯)是本地验证范围的唯一说明。局部修改用受影响测试，Web 修改运行生产构建下的相关旅程并查看真实画面；完整交付使用 `pnpm verify:product`，CI 保留全量检查。
 
-`pnpm test:coverage` 是独立门禁，不包含在 `check` 或 `test` 中；当前统计范围和阈值见[开发与测试规范的覆盖率门禁](../06-开发与测试规范.md#覆盖率门禁)。用户可见 Web 改动必须完成生产构建产品旅程和真实像素视觉验收。品牌资产使用 `pnpm brand:export` 生成，使用 `pnpm brand:check` 验证；公开构建不得依赖 `.local`。
+`pnpm test:coverage` 是独立门禁，适用范围和阈值见[覆盖率门禁](../06-开发与测试规范.md#覆盖率门禁)。品牌资产使用 `pnpm brand:export` 生成，使用 `pnpm brand:check` 验证；公开构建不依赖本地私有资料。
 
 ## 提交
 

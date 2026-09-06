@@ -15,7 +15,6 @@ const contributionCopyRoots = (await readdir(path.join(root, 'packages'), { with
   )
   .map((entry) => `packages/${entry.name}/src`)
 const visibleSourceRoots = [productRoot, ...contributionCopyRoots]
-const copyGuide = 'docs/01-术语与文案规范.md §4.1「界面文案只说明对象、范围和结果」'
 const terminologyGuide = 'docs/01-术语与文案规范.md §3–4'
 const exceptionConfigPath = 'scripts/baselines/user-visible-copy-exceptions.json'
 const visibleAttributeNames = new Set([
@@ -47,30 +46,6 @@ const forbiddenTerms = [
   ['Session', /\bSession\b/iu],
   ['QQ', /QQ/u],
 ]
-/** @type {ReadonlyArray<readonly [string, RegExp]>} */
-const forbiddenCopyPatterns = [
-  [
-    'navigation-self-explanation',
-    /(?:不(?:需要|必|用)(?:再)?(?:逐个|逐一)?(?:进入|前往|跳转|打开|切换到|离开|返回)|无需(?:再)?(?:逐个|逐一)?(?:进入|前往|跳转|打开|切换到|离开|返回)|(?:可|可以|能够|直接)(?:在|从)(?:本页|当前页|这个页面|该页面|这里|此处|当前区域)|(?:完成|保存|提交)后(?:仍|继续)?(?:留在|停留在|返回|回到)(?:本页|当前页|这个页面|该页面|这里|此处|当前区域|[^，。！？]{1,12}页)|(?:逐个|逐一)(?:进入|前往|打开|点击|切换))/u,
-  ],
-  ['speculative-negation', /(?:不会|无需|无须|不需要|不必|不用|不删除)/u],
-  ['vague-sequence', /(?:之后|以后)/u],
-  ['vague-continuity', /(?:保持|继续|仍然?|始终)/u],
-  ['conditional-can', /才(?:能|会)/u],
-  ['ambiguous-reopen', /重开/u],
-  ['casual-navigation', /(?:^|[。！？；])到[「『“][^」』”]+[」』”]/u],
-  ['em-dash', /—+/u],
-]
-const copyFindingMessages = new Map([
-  ['navigation-self-explanation', '使用界面导航自我解说'],
-  ['speculative-negation', '使用臆测式否定'],
-  ['vague-sequence', '使用没有明确事件锚点的时序词'],
-  ['vague-continuity', '使用多余或缺少对比对象的状态延续词'],
-  ['conditional-can', '使用含糊的“才”式前置条件'],
-  ['ambiguous-reopen', '使用含义不明确的“重开”'],
-  ['casual-navigation', '使用口语化页面导航'],
-  ['em-dash', '使用破折号或破折号占位'],
-])
 const technicalIdName = /(?:^id$|Id$|ID$|Key$|Ns$)/u
 
 const normalizeVisibleText = (text) => text.replace(/\s+/gu, ' ').trim()
@@ -125,19 +100,6 @@ function inspectSource(relativePath, source, { includeTerms = true } = {}) {
           message: `用户可见${context}包含内部术语“${term}”。`,
         })
       }
-    }
-    for (const [name, pattern] of forbiddenCopyPatterns) {
-      pattern.lastIndex = 0
-      if (!pattern.test(normalizedText)) continue
-      const position = file.getLineAndCharacterOfPosition(node.getStart(file))
-      findings.push({
-        file: relativePath,
-        line: position.line + 1,
-        rule: `copy:${name}`,
-        text: normalizedText,
-        message: `用户可见${context}${copyFindingMessages.get(name) ?? '使用受限文案模式'}“${normalizedText}”。`,
-      })
-      break
     }
   }
 
@@ -292,11 +254,7 @@ function inspectSource(relativePath, source, { includeTerms = true } = {}) {
   )
 }
 
-const knownRules = new Set([
-  ...forbiddenTerms.map(([term]) => `term:${term}`),
-  ...forbiddenCopyPatterns.map(([name]) => `copy:${name}`),
-  'technical-id-fallback',
-])
+const knownRules = new Set([...forbiddenTerms.map(([term]) => `term:${term}`), 'technical-id-fallback'])
 
 const exceptionKey = ({ file, rule, text }) => `${file}\0${rule}\0${text}`
 
@@ -348,15 +306,13 @@ function applyExceptions(findings, exceptions) {
   }
 }
 
-const guidanceForRule = (rule) => (rule.startsWith('copy:') ? copyGuide : terminologyGuide)
-
 const formatFindings = (findings) =>
   [
     '发现用户可见术语或文案问题：',
     ...findings.flatMap((finding) => [
       `${finding.file}:${finding.line} [${finding.rule}] ${finding.message}`,
       `  文案：“${finding.text}”`,
-      `  修正：请阅读 ${guidanceForRule(finding.rule)}。`,
+      `  修正：请阅读 ${terminologyGuide}。`,
     ]),
     `如该文案在此处确有必要，请在 ${exceptionConfigPath} 添加精确的 file、rule、text 和 reason；不要在源码中添加忽略注释。`,
   ].join('\n')
@@ -402,23 +358,10 @@ export function Fixture({ model }) {
     [
       [4, 'term:Gateway'],
       [5, 'term:Client UI'],
-      [6, 'copy:navigation-self-explanation'],
       [8, 'term:Extension Draft'],
       [9, 'term:QQ'],
       [10, 'term:Revision'],
       [11, 'technical-id-fallback'],
-      [12, 'copy:navigation-self-explanation'],
-      [13, 'copy:navigation-self-explanation'],
-      [15, 'copy:navigation-self-explanation'],
-      [16, 'copy:speculative-negation'],
-      [17, 'copy:speculative-negation'],
-      [18, 'copy:vague-sequence'],
-      [19, 'copy:vague-continuity'],
-      [20, 'copy:conditional-can'],
-      [21, 'copy:ambiguous-reopen'],
-      [22, 'copy:casual-navigation'],
-      [23, 'copy:em-dash'],
-      [24, 'copy:speculative-negation'],
     ],
   )
   assert.equal(
@@ -431,23 +374,23 @@ export function Fixture({ model }) {
       `export const adapter = { displayName: 'QQ 官方机器人', description: '保存之后启用。' }`,
       { includeTerms: false },
     ).map(({ rule }) => rule),
-    ['copy:vague-sequence'],
-    'Adapter 元数据必须检查文案模式，但平台展示名不应触发产品壳术语规则。',
+    [],
+    'Adapter 平台展示名和自然中文说明不应触发产品壳术语规则。',
   )
   const configured = parseExceptionConfig({
     description: 'fixture',
     exceptions: [
       {
         file: 'fixtures/terminology.tsx'.replace('fixtures', productRoot),
-        rule: 'copy:speculative-negation',
-        text: '保存后不会自动启用。',
+        rule: 'term:Agent',
+        text: 'Agent 示例',
         reason: '验证精确文案例外会被消费。',
       },
     ],
   })
   const exceptionFixture = inspectSource(
     `${productRoot}/terminology.tsx`,
-    'export function Fixture() { return <p>保存后不会自动启用。</p> }',
+    'export function Fixture() { return <p>Agent 示例</p> }',
   )
   const applied = applyExceptions(exceptionFixture, configured)
   assert.equal(applied.findings.length, 0)
@@ -460,24 +403,44 @@ export function Fixture({ model }) {
         exceptions: [
           {
             file: `${productRoot}/fixture.tsx`,
-            rule: 'copy:navigation-self-explanation',
-            text: '可在本页管理。',
+            rule: 'term:Agent',
+            text: 'Agent 示例',
             reason: '太短',
           },
         ],
       }),
     /至少 8 个字符/u,
   )
-  const copyOutput = formatFindings(
-    findings.filter(({ rule }) => rule === 'copy:navigation-self-explanation').slice(0, 1),
+  const termOutput = formatFindings(findings.filter(({ rule }) => rule === 'term:Revision'))
+  assert.match(termOutput, /docs\/01-术语与文案规范\.md §3–4/u)
+  assert.match(termOutput, /scripts\/baselines\/user-visible-copy-exceptions\.json/u)
+  assert.match(termOutput, /new Revision/u)
+  for (const [term] of forbiddenTerms) {
+    assert.ok(
+      inspectSource(`${productRoot}/fixture.tsx`, `<p>${term}</p>`).some(({ rule }) => rule === `term:${term}`),
+      `内部术语 ${term} 必须被拦截。`,
+    )
+  }
+  assert.deepEqual(
+    inspectSource(
+      `${productRoot}/natural.tsx`,
+      `
+      const hint = '保存之后仍可继续编辑，不会自动启用。'
+      const entries = ['保持连接', '以后重开', '无需逐个进入详情']
+      const config = { description: '连接成功后才能发送——请等待连接完成。' }
+      export const view = <section><p>到「连接」添加账号。不删除外部频道。</p>
+        <Field hint={hint} title="不用切换页面，可在本页管理。" />
+        {entries.map((entry) => <p>{entry}</p>)}
+      </section>
+    `,
+    ),
+    [],
+    '自然中文在 JSX、属性、展示变量、集合和配置文案中均不逐词阻断。',
   )
-  assert.match(copyOutput, /docs\/01-术语与文案规范\.md §4\.1/u)
-  assert.match(copyOutput, /scripts\/baselines\/user-visible-copy-exceptions\.json/u)
-  assert.match(copyOutput, /保存后不必离开当前页面/u)
   assert.match(formatStaleExceptions(configured), /未命中的陈旧例外/u)
   if (log) {
     console.log(
-      'Terminology self-test passed (visible copy, copy anti-patterns, exact exceptions and stale exceptions are covered).',
+      'Terminology self-test passed (natural Chinese, internal terms, technical IDs, Adapter display names and exact/stale exceptions are covered).',
     )
   }
 }

@@ -1,10 +1,13 @@
 import { execFileSync } from 'node:child_process'
-import { readdir, readFile, stat } from 'node:fs/promises'
+import { lstat, readdir, readFile, realpath, stat } from 'node:fs/promises'
 import path from 'node:path'
 
 const root = process.cwd()
+const realRoot = await realpath(root)
 const rootDocument = 'AGENTS.md'
 const optionalLocalIndex = '.local/README.md'
+// Only these directories own unlinked local knowledge; runtime trees are never enumerated.
+const maintainedLocalDirectories = ['.local/docs', '.local/brand-design']
 const errors = []
 
 const toRepositoryPath = (file) => path.relative(root, file).split(path.sep).join('/')
@@ -12,26 +15,34 @@ const toRepositoryPath = (file) => path.relative(root, file).split(path.sep).joi
 const exists = async (target) => {
   try {
     return await stat(target)
-  } catch {
-    return undefined
+  } catch (error) {
+    if (error instanceof Error && 'code' in error && (error.code === 'ENOENT' || error.code === 'ENOTDIR')) {
+      return undefined
+    }
+    throw error
   }
 }
 
 async function collectMarkdown(target) {
-  const info = await exists(target)
-  if (info === undefined) return []
+  const info = await lstat(target).catch((error) => {
+    if (error.code === 'ENOENT') return undefined
+    throw error
+  })
+  if (info === undefined || info.isSymbolicLink()) return []
   if (info.isFile()) return target.endsWith('.md') ? [target] : []
+  if (!info.isDirectory()) return []
   const names = await readdir(target, { withFileTypes: true })
-  const nested = await Promise.all(
-    names
-      .filter((entry) => !entry.name.startsWith('.') || entry.name === '.local')
-      .map((entry) => collectMarkdown(path.join(target, entry.name))),
-  )
+  const nested = await Promise.all(names.map((entry) => collectMarkdown(path.join(target, entry.name))))
   return nested.flat()
 }
 
-const isGeneratedLocalDocument = (relativePath) =>
-  relativePath.startsWith('.local/playwright-') || relativePath.startsWith('.local/coverage/')
+const isPrivatePath = (file) =>
+  file === '.local' ||
+  file.startsWith('.local/') ||
+  file === 'docs-private' ||
+  file.startsWith('docs-private/') ||
+  (!file.includes('/') && file.endsWith('.local.md'))
+const isRepositoryPath = (file) => file !== '..' && !file.startsWith('../') && !path.isAbsolute(file)
 
 const publicDocumentCandidates = execFileSync(
   'git',
@@ -44,23 +55,21 @@ const publicDocumentCandidates = execFileSync(
   .split('\0')
   .filter(Boolean)
 
-const trackedDocuments = []
+const publicDocuments = new Set()
 for (const file of publicDocumentCandidates) {
-  if (await exists(path.join(root, file))) trackedDocuments.push(file)
+  if ((await exists(path.join(root, file)))?.isFile()) publicDocuments.add(file)
 }
-
-const ignoredDocumentCandidates = [
-  ...(await collectMarkdown(path.join(root, '.local'))),
-  ...(await collectMarkdown(path.join(root, 'docs-private'))),
-  ...(await readdir(root, { withFileTypes: true })).flatMap((entry) =>
-    entry.isFile() && entry.name.endsWith('.local.md') ? [path.join(root, entry.name)] : [],
-  ),
-]
-const localDocuments = [...new Set(ignoredDocumentCandidates.map(toRepositoryPath))]
-  .filter((file) => !trackedDocuments.includes(file) && !isGeneratedLocalDocument(file))
-  .sort()
-const documentPaths = new Set([...trackedDocuments, ...localDocuments])
-const graph = new Map([...documentPaths].map((file) => [file, new Set()]))
+const localDocuments = new Set(
+  (await Promise.all(maintainedLocalDirectories.map((directory) => collectMarkdown(path.join(root, directory)))))
+    .flat()
+    .map(toRepositoryPath)
+    .filter((file) => !publicDocuments.has(file)),
+)
+if ((await exists(path.join(root, optionalLocalIndex)))?.isFile() && !publicDocuments.has(optionalLocalIndex)) {
+  localDocuments.add(optionalLocalIndex)
+}
+const documentPaths = new Set([...publicDocuments, ...localDocuments])
+const graph = new Map()
 
 function headingSlugs(markdown) {
   const counts = new Map()
@@ -95,6 +104,7 @@ const isOptionalMissingLocalIndex = (source, target) =>
 for (const source of documentPaths) {
   const file = path.join(root, source)
   const content = await readFile(file, 'utf8')
+  graph.set(source, new Set())
 
   for (const match of content.matchAll(/\[[^\]]*\]\(([^)]+)\)/gu)) {
     const raw = match[1].trim().replace(/^<|>$/g, '')
@@ -104,8 +114,15 @@ for (const source of documentPaths) {
     const target = decodedTarget ? path.resolve(path.dirname(file), decodedTarget) : file
     const targetPath = toRepositoryPath(target)
     const info = await exists(target)
+    const optionalIndexLink = isOptionalMissingLocalIndex(source, target) && !fragment
+    const privateTarget =
+      isPrivatePath(targetPath) || (info?.isFile() && targetPath.endsWith('.md') && !publicDocuments.has(targetPath))
+    if (publicDocuments.has(source) && privateTarget && !optionalIndexLink) {
+      errors.push(`${source}: 公开文档只能由根 AGENTS.md 链接本地私有索引，不能链接 ${targetPath}`)
+      continue
+    }
     if (info === undefined) {
-      if (!isOptionalMissingLocalIndex(source, target)) errors.push(`${source}: 找不到链接目标 ${raw}`)
+      if (!optionalIndexLink) errors.push(`${source}: 找不到链接目标 ${raw}`)
       continue
     }
     if (!info.isFile() && fragment) {
@@ -117,26 +134,49 @@ for (const source of documentPaths) {
       const wanted = decodeTarget(fragment).toLowerCase()
       if (!headingSlugs(targetContent).has(wanted)) errors.push(`${source}: 找不到标题 #${fragment}（${raw}）`)
     }
-    if (documentPaths.has(targetPath)) graph.get(source)?.add(targetPath)
-    if (trackedDocuments.includes(source) && targetPath.startsWith('.local/')) {
-      if (source !== rootDocument || targetPath !== optionalLocalIndex) {
-        errors.push(`${source}: 公开文档只能由根 AGENTS.md 链接本地私有索引，不能链接 ${targetPath}`)
-      }
+    // Explicit Markdown links opt local files into maintenance, even outside the knowledge directories.
+    // Directory and asset links only validate their target; they never trigger a recursive scan.
+    // Resolve symlinks before enrollment so external references only validate target and fragment.
+    if (
+      localDocuments.has(source) &&
+      info.isFile() &&
+      targetPath.endsWith('.md') &&
+      isRepositoryPath(targetPath) &&
+      !publicDocuments.has(targetPath) &&
+      isRepositoryPath(
+        path
+          .relative(realRoot, await realpath(target))
+          .split(path.sep)
+          .join('/'),
+      )
+    ) {
+      localDocuments.add(targetPath)
+      documentPaths.add(targetPath)
     }
+    if (documentPaths.has(targetPath)) graph.get(source).add(targetPath)
   }
 }
 
-const reachable = new Set()
-const pending = [rootDocument]
-while (pending.length > 0) {
-  const source = pending.pop()
-  if (source === undefined || reachable.has(source)) continue
-  reachable.add(source)
-  for (const target of graph.get(source) ?? []) pending.push(target)
+function findReachable(start, allowed) {
+  const reachable = new Set()
+  const pending = [start]
+  while (pending.length > 0) {
+    const source = pending.pop()
+    if (source === undefined || reachable.has(source) || !allowed.has(source)) continue
+    reachable.add(source)
+    for (const target of graph.get(source) ?? []) pending.push(target)
+  }
+  return reachable
 }
 
-const unreachablePublic = trackedDocuments.filter((file) => !reachable.has(file))
-const unreachableLocal = localDocuments.filter((file) => !reachable.has(file))
+// Private links cannot make public documents reachable, or bypass the private index.
+const reachablePublic = findReachable(rootDocument, publicDocuments)
+const reachableLocal = graph.get(rootDocument)?.has(optionalLocalIndex)
+  ? findReachable(optionalLocalIndex, localDocuments)
+  : new Set()
+if (!publicDocuments.has(rootDocument)) errors.push('找不到公开文档根 AGENTS.md')
+const unreachablePublic = [...publicDocuments].filter((file) => !reachablePublic.has(file)).sort()
+const unreachableLocal = [...localDocuments].filter((file) => !reachableLocal.has(file)).sort()
 if (unreachablePublic.length > 0) {
   errors.push(
     ['以下公开文档无法从 AGENTS.md 沿引用链到达：', ...unreachablePublic.map((file) => `  - ${file}`)].join('\n'),
@@ -157,6 +197,6 @@ if (errors.length > 0) {
   process.exitCode = 1
 } else {
   console.log(
-    `Documentation graph check passed (${trackedDocuments.length} public files, ${localDocuments.length} local files).`,
+    `Documentation graph check passed (${publicDocuments.size} public files, ${localDocuments.size} local files).`,
   )
 }

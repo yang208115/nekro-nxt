@@ -238,6 +238,15 @@ const projectAdapterDescriptor = (
       ? {}
       : { processingFeedback: { channelKinds: descriptor.features.processingFeedback.channelKinds } },
   diagnostics: descriptor.diagnostics,
+  ...(descriptor.creation === undefined
+    ? {}
+    : {
+        creation: {
+          mode: descriptor.creation.mode,
+          ...(descriptor.creation.actionLabel === undefined ? {} : { actionLabel: descriptor.creation.actionLabel }),
+          ...(descriptor.creation.pendingLabel === undefined ? {} : { pendingLabel: descriptor.creation.pendingLabel }),
+        },
+      }),
   configSchema: {
     schemaVersion: descriptor.configSchema.schemaVersion,
     type: 'object',
@@ -465,6 +474,10 @@ const projectSnapshot = (json: SnapshotJson, successfulAt: number): ProductSnaps
     const adapterName = connectionAdapterName(connection)
     const descriptor = json.connectionAdapters.find(({ key }) => key === connection.adapterKey)
     const runtimeState = connection.status.state
+    const adapterSettings =
+      connection.adapterSettings?.wechatIlink === undefined
+        ? undefined
+        : { wechatIlink: connection.adapterSettings.wechatIlink }
     return {
       id: connection.id,
       ...(connection.alias === undefined ? {} : { alias: connection.alias }),
@@ -490,6 +503,7 @@ const projectSnapshot = (json: SnapshotJson, successfulAt: number): ProductSnaps
       ...(connection.status.processingFeedback === undefined
         ? {}
         : { processingFeedbackCapability: connection.status.processingFeedback }),
+      ...(adapterSettings === undefined ? {} : { adapterSettings }),
       channels: connection.channelCount ?? 0,
       knownChannels: (connection.knownChannels ?? []).map((channel) => ({
         ...channel,
@@ -1076,12 +1090,45 @@ export class HttpProductHost implements ProductHostPort {
       await this.#refreshAndNotify()
       return result
     }
+    if (command === 'connections.wechatIlinkLogin.start') {
+      const alias = typeof input?.['alias'] === 'string' ? input['alias'] : undefined
+      return await this.#call(
+        HostApiContracts.startWechatIlinkLogin,
+        {},
+        HostApiContracts.startWechatIlinkLogin.parseRequest({ ...(alias === undefined ? {} : { alias }) }),
+      )
+    }
+    if (command === 'connections.wechatIlinkLogin.get') {
+      const loginId = typeof input?.['loginId'] === 'string' ? input['loginId'] : ''
+      if (!loginId.trim()) throw new Error('缺少微信 iLink 登录会话，请重新扫码。')
+      const result = await this.#call(HostApiContracts.getWechatIlinkLogin, { loginId }, undefined)
+      if (result.status === 'confirmed') await this.#refreshAndNotify()
+      return result
+    }
+    if (command === 'connections.wechatIlinkLogin.cancel') {
+      const loginId = typeof input?.['loginId'] === 'string' ? input['loginId'] : ''
+      if (!loginId.trim()) return null
+      return await this.#call(HostApiContracts.cancelWechatIlinkLogin, { loginId }, undefined)
+    }
     if (command === 'connections.updateAlias') {
       const connectionId = typeof input?.['connectionId'] === 'string' ? input['connectionId'] : ''
       const alias = typeof input?.['alias'] === 'string' ? input['alias'] : undefined
       if (!connectionId.trim()) throw new Error('缺少连接标识，请刷新页面后重试。')
       if (alias === undefined) throw new Error('连接别名格式无效，请重新填写。')
       const result = await this.#call(HostApiContracts.updateConnectionAlias, { connectionId }, { alias })
+      await this.#refreshAndNotify()
+      return result
+    }
+    if (command === 'connections.wechatIlinkInboundMedia.update') {
+      const connectionId = typeof input?.['connectionId'] === 'string' ? input['connectionId'] : ''
+      const enableInboundMedia = input?.['enableInboundMedia']
+      if (!connectionId.trim()) throw new Error('缺少连接标识，请刷新页面后重试。')
+      if (typeof enableInboundMedia !== 'boolean') throw new Error('入站图片接收设置格式无效，请重新操作。')
+      const result = await this.#call(
+        HostApiContracts.updateWechatIlinkInboundMedia,
+        { connectionId },
+        { enableInboundMedia },
+      )
       await this.#refreshAndNotify()
       return result
     }

@@ -1,5 +1,7 @@
+import type { AdapterConnectionDescriptor } from '@nekro-nxt/adapter-sdk'
+import type { HostApiResponse } from '@nekro-nxt/contracts'
 import { ArrowRight, Cable, Check, Circle, Plus, Radio, RotateCcw, Send, Trash2 } from 'lucide-react'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Navigate, useParams, useSearchParams } from 'react-router-dom'
 import { notify } from '../components/notifications.js'
 import { EmptyState, InlineFeedback, PageHeader } from '../components/product-feedback.js'
@@ -27,6 +29,7 @@ import {
 } from '../ui-kit/index.js'
 import styles from './product-pages.module.css'
 import { AdapterConnectionExtensionSlot } from '../adapter-host-client.js'
+import { createQrCodeSvgDataUrl } from '../qr-code.js'
 
 const connectionTone = (state: ConnectionState): StatusTone => {
   if (state === '已连接') return 'success'
@@ -59,6 +62,27 @@ export const friendlyKnownChannelLabel = (channel: { readonly name: string; read
   return channel.name
 }
 
+type WechatIlinkLoginView = HostApiResponse<'startWechatIlinkLogin'> | HostApiResponse<'getWechatIlinkLogin'>
+
+const isWechatIlinkLoginActive = (login: WechatIlinkLoginView | null): login is WechatIlinkLoginView =>
+  login?.status === 'pending' || login?.status === 'scanned'
+
+const isWechatIlinkLoginRestartable = (login: WechatIlinkLoginView | null): boolean =>
+  login === null || login.status === 'failed' || login.status === 'expired' || login.status === 'cancelled'
+
+const collectConnectionDefaults = (
+  platform: AdapterConnectionDescriptor | undefined,
+): Record<string, string | number | boolean> => {
+  const defaults: Record<string, string | number | boolean> = {}
+  for (const [key, property] of Object.entries(platform?.configSchema.properties ?? {})) {
+    if (property === undefined) continue
+    if (property.type !== 'credential-reference' && property.default !== undefined) {
+      defaults[key] = property.default
+    }
+  }
+  return defaults
+}
+
 export function ConnectionsPage() {
   const { connectionId = '' } = useParams()
   const [searchParams, setSearchParams] = useSearchParams()
@@ -74,16 +98,20 @@ export function ConnectionsPage() {
     [descriptors],
   )
   const selectedId = connectionId || connections[0]?.id || ''
+  const requestedCreateParam = searchParams.get('create') ?? ''
   const requestedAdapterKey = searchParams.get('adapter') ?? ''
-  const [createOpen, setCreateOpen] = useState(searchParams.get('create') === '1')
+  const initializedCreateSearchKeyRef = useRef('')
+  const [createOpen, setCreateOpen] = useState(requestedCreateParam === '1')
   const [createStage, setCreateStage] = useState<'platform' | 'configuration'>(
-    searchParams.get('create') === '1' && requestedAdapterKey ? 'configuration' : 'platform',
+    requestedCreateParam === '1' && requestedAdapterKey ? 'configuration' : 'platform',
   )
   const [selectedPlatformKey, setSelectedPlatformKey] = useState(requestedAdapterKey)
   const [configuration, setConfiguration] = useState<Record<string, string | number | boolean>>({})
   const [credentials, setCredentials] = useState<Record<string, string>>({})
   const [createAlias, setCreateAlias] = useState('')
   const [createError, setCreateError] = useState('')
+  const [createPlatform, setCreatePlatform] = useState<AdapterConnectionDescriptor | null>(null)
+  const [wechatLogin, setWechatLogin] = useState<WechatIlinkLoginView | null>(null)
   const [testPending, setTestPending] = useState<'receive' | 'send' | null>(null)
   const [testChannelByConnection, setTestChannelByConnection] = useState<Record<string, string>>({})
   const [testsOpen, setTestsOpen] = useState(false)
@@ -91,32 +119,38 @@ export function ConnectionsPage() {
   const [aliasDraft, setAliasDraft] = useState('')
   const [aliasPending, setAliasPending] = useState(false)
   const [activityDefaultsPending, setActivityDefaultsPending] = useState(false)
+  const [mediaSettingsPending, setMediaSettingsPending] = useState(false)
   const [deleteOpen, setDeleteOpen] = useState(false)
   const [deleteChannelData, setDeleteChannelData] = useState(false)
 
   useEffect(() => {
-    if (searchParams.get('create') !== '1') return
-    const adapter = searchParams.get('adapter') ?? ''
-    const platform = creatablePlatforms.find((item) => item.key === adapter)
+    if (requestedCreateParam !== '1') {
+      initializedCreateSearchKeyRef.current = ''
+      return
+    }
+    const createSearchKey = 'create=1&adapter=' + requestedAdapterKey
+    if (initializedCreateSearchKeyRef.current === createSearchKey) return
+    const platform = creatablePlatforms.find((item) => item.key === requestedAdapterKey)
+    if (requestedAdapterKey && !platform) return
+    initializedCreateSearchKeyRef.current = createSearchKey
     setCreateOpen(true)
     setCreateAlias('')
     setCreateError('')
+    setWechatLogin(null)
     if (platform) {
+      setCreatePlatform(platform)
       setSelectedPlatformKey(platform.key)
       setCreateStage('configuration')
-      const defaults: Record<string, string | number | boolean> = {}
-      for (const [key, property] of Object.entries(platform.configSchema.properties)) {
-        if (property.type !== 'credential-reference' && property.default !== undefined) {
-          defaults[key] = property.default
-        }
-      }
-      setConfiguration(defaults)
+      setConfiguration(collectConnectionDefaults(platform))
       setCredentials({})
       return
     }
+    const platformStageSelection =
+      creatablePlatforms.find((item) => item.key === selectedPlatformKey) ?? creatablePlatforms[0]
+    setCreatePlatform(platformStageSelection ?? null)
     setCreateStage('platform')
-    setSelectedPlatformKey((current) => current || creatablePlatforms[0]?.key || '')
-  }, [searchParams, creatablePlatforms])
+    setSelectedPlatformKey((current) => current || platformStageSelection?.key || '')
+  }, [requestedCreateParam, requestedAdapterKey, creatablePlatforms, selectedPlatformKey])
 
   const selected = connections.find((connection) => connection.id === selectedId) ?? connections[0]
 
@@ -132,12 +166,10 @@ export function ConnectionsPage() {
           Object.values(credentials).some((value) => value.length > 0))),
   )
 
-  if (!connectionId && connections[0]) {
-    const query = searchParams.toString()
-    return <Navigate to={`/connections/${connections[0].id}${query ? `?${query}` : ''}`} replace />
-  }
-
-  const selectedPlatform = creatablePlatforms.find((platform) => platform.key === selectedPlatformKey)
+  const selectedPlatformFromCatalog = creatablePlatforms.find((platform) => platform.key === selectedPlatformKey)
+  const selectedPlatform =
+    selectedPlatformFromCatalog ??
+    (createOpen && createPlatform?.key === selectedPlatformKey ? createPlatform : undefined)
   const selectedDescriptor = descriptors.find((descriptor) => descriptor.key === selected?.adapterKey)
   const connectionActivities = (selectedDescriptor?.activities ?? []).filter((activity) => {
     const capability = selected?.activityCapabilities[activity.key]
@@ -155,6 +187,7 @@ export function ConnectionsPage() {
   const selectedChannels = selected ? channels.filter((channel) => channel.connectionId === selected.id) : []
   const bindingCount = selectedChannels.reduce((count, channel) => count + channel.bindings.length, 0)
   const firstBoundChannel = selectedChannels.find((channel) => channel.bindings.length > 0)
+  const wechatIlinkSettings = selected?.adapterSettings?.wechatIlink
 
   const saveAlias = async (alias: string): Promise<void> => {
     if (!selected || aliasPending) return
@@ -169,24 +202,36 @@ export function ConnectionsPage() {
     }
   }
 
+  const updateWechatIlinkInboundMedia = async (enabled: boolean): Promise<void> => {
+    if (!selected || mediaSettingsPending) return
+    setMediaSettingsPending(true)
+    try {
+      await useProductStore.getState().updateWechatIlinkInboundMedia(selected.id, enabled)
+      notify(
+        enabled ? '微信 iLink 入站图片接收已开启。' : '微信 iLink 入站图片接收已关闭。',
+        'success',
+        'connection-media:' + selected.id,
+      )
+    } catch (error) {
+      notify(error instanceof Error ? error.message : String(error), 'error', 'connection-media:' + selected.id)
+    } finally {
+      setMediaSettingsPending(false)
+    }
+  }
+
   const applyPlatformDefaults = (adapterKey: string): void => {
     const platform = creatablePlatforms.find((item) => item.key === adapterKey) ?? creatablePlatforms[0]
     setSelectedPlatformKey(platform?.key ?? '')
-    const defaults: Record<string, string | number | boolean> = {}
-    if (platform) {
-      for (const [key, property] of Object.entries(platform.configSchema.properties)) {
-        if (property.type !== 'credential-reference' && property.default !== undefined) {
-          defaults[key] = property.default
-        }
-      }
-    }
-    setConfiguration(defaults)
+    setCreatePlatform(platform ?? null)
+    setConfiguration(collectConnectionDefaults(platform))
     setCredentials({})
+    setWechatLogin(null)
   }
 
   const openCreate = (adapterKey?: string): void => {
     setCreateAlias('')
     setCreateError('')
+    setWechatLogin(null)
     if (adapterKey && creatablePlatforms.some((item) => item.key === adapterKey)) {
       applyPlatformDefaults(adapterKey)
       setCreateStage('configuration')
@@ -195,6 +240,82 @@ export function ConnectionsPage() {
       setCreateStage('platform')
     }
     setCreateOpen(true)
+  }
+
+  const selectedCreationMode = selectedPlatform?.creation?.mode ?? 'schema-form'
+  const isQrLoginCreate = createStage === 'configuration' && selectedCreationMode === 'qr-login'
+  const wechatLoginActive = isWechatIlinkLoginActive(wechatLogin)
+  const wechatLoginQrImage = wechatLogin?.qrCodeUrl ? createQrCodeSvgDataUrl(wechatLogin.qrCodeUrl) : ''
+
+  const clearCreateSearchParams = (): void => {
+    if (searchParams.get('create') !== '1' && !searchParams.get('adapter')) return
+    const next = new URLSearchParams(searchParams)
+    next.delete('create')
+    next.delete('adapter')
+    setSearchParams(next, { replace: true })
+  }
+
+  const resetCreateState = (): void => {
+    setCreateStage('platform')
+    setCreateAlias('')
+    setCreateError('')
+    setConfiguration({})
+    setCredentials({})
+    setCreatePlatform(null)
+    setWechatLogin(null)
+  }
+
+  const handleCreateOpenChange = (open: boolean): void => {
+    setCreateOpen(open)
+    if (open) return
+    const activeLogin = wechatLogin
+    if (isWechatIlinkLoginActive(activeLogin)) {
+      void useProductStore
+        .getState()
+        .cancelWechatIlinkLogin(activeLogin.loginId)
+        .catch(() => undefined)
+    }
+    resetCreateState()
+    clearCreateSearchParams()
+  }
+
+  const startWechatLogin = async (): Promise<WechatIlinkLoginView> => {
+    const login = await useProductStore.getState().startWechatIlinkLogin({})
+    setWechatLogin(login)
+    return login
+  }
+
+  useEffect(() => {
+    const activeLogin = wechatLogin
+    if (!createOpen || !isQrLoginCreate || !isWechatIlinkLoginActive(activeLogin)) return
+    const loginId = activeLogin.loginId
+    const timer = window.setInterval(() => {
+      void useProductStore
+        .getState()
+        .getWechatIlinkLogin(loginId)
+        .then((next) => {
+          setWechatLogin((current) => (current?.loginId === loginId ? next : current))
+          if (next.status === 'confirmed') {
+            notify('连接已创建', 'success', 'connection-create')
+            setCreateOpen(false)
+            resetCreateState()
+            clearCreateSearchParams()
+          }
+        })
+        .catch((error) => {
+          const message = error instanceof Error ? error.message : String(error)
+          setCreateError(message)
+          setWechatLogin((current) =>
+            current?.loginId === loginId ? { ...current, status: 'failed', message } : current,
+          )
+        })
+    }, 1500)
+    return () => window.clearInterval(timer)
+  }, [createOpen, isQrLoginCreate, searchParams, setSearchParams, wechatLogin])
+
+  if (!connectionId && connections[0]) {
+    const query = searchParams.toString()
+    return <Navigate to={`/connections/${connections[0].id}${query ? `?${query}` : ''}`} replace />
   }
 
   const selectedAdapterCreatable = Boolean(
@@ -472,6 +593,21 @@ export function ConnectionsPage() {
                   </div>
                   <small className={styles.inlineFieldHint}>可选，用于区分同适配器频道连接</small>
                 </div>
+                {wechatIlinkSettings ? (
+                  <>
+                    <div className={styles.sectionDivider} />
+                    <div className={styles.connectionAliasEditor}>
+                      <div className={styles.sectionHeading}>微信 iLink 设置</div>
+                      <SwitchField
+                        label="入站图片接收"
+                        description="开启后，微信 iLink 收到的图片会下载并导入为频道图片资源；关闭时只记录可解释的占位内容。"
+                        checked={wechatIlinkSettings.enableInboundMedia}
+                        disabled={mediaSettingsPending}
+                        onCheckedChange={(checked) => void updateWechatIlinkInboundMedia(checked)}
+                      />
+                    </div>
+                  </>
+                ) : null}
               </>
             ) : null}
 
@@ -602,43 +738,80 @@ export function ConnectionsPage() {
 
       <ConfirmDialog
         open={createOpen}
-        onOpenChange={(open) => {
-          setCreateOpen(open)
-          if (!open) {
-            setCreateStage('platform')
-            setCreateAlias('')
-            setCreateError('')
-            if (searchParams.get('create') === '1' || searchParams.get('adapter')) {
-              const next = new URLSearchParams(searchParams)
-              next.delete('create')
-              next.delete('adapter')
-              setSearchParams(next, { replace: true })
-            }
-          }
-        }}
-        title={createStage === 'platform' ? '选择平台' : `配置 ${selectedPlatform?.displayName ?? ''}`.trim()}
+        onOpenChange={handleCreateOpenChange}
+        title={
+          createStage === 'platform'
+            ? '选择平台'
+            : isQrLoginCreate
+              ? ('登录 ' + (selectedPlatform?.displayName ?? '')).trim()
+              : ('配置 ' + (selectedPlatform?.displayName ?? '')).trim()
+        }
         description={
           createStage === 'platform'
             ? '选择要连接的平台账号。'
-            : (selectedPlatform?.description ?? '填写平台账号需要的配置。')
+            : isQrLoginCreate
+              ? '使用平台应用扫码登录。登录成功后会自动创建平台连接。'
+              : (selectedPlatform?.description ?? '填写平台账号需要的配置。')
         }
-        confirmLabel={createStage === 'platform' ? '填写连接信息' : '创建连接'}
+        confirmLabel={
+          createStage === 'platform'
+            ? selectedPlatform?.creation?.mode === 'qr-login'
+              ? (selectedPlatform.creation.actionLabel ?? '扫码登录')
+              : '填写连接信息'
+            : isQrLoginCreate
+              ? wechatLoginActive
+                ? (selectedPlatform?.creation?.pendingLabel ?? '等待扫码确认…')
+                : (selectedPlatform?.creation?.actionLabel ?? '扫码登录')
+              : '创建连接'
+        }
+        confirmLoadingLabel={
+          isQrLoginCreate || selectedPlatform?.creation?.mode === 'qr-login' ? '正在生成二维码…' : '处理中…'
+        }
+        confirmDisabled={isQrLoginCreate && wechatLoginActive}
         onConfirm={async () => {
           if (!selectedPlatform) {
             setCreateError('请选择连接平台。')
             return false
           }
           if (createStage === 'platform') {
-            const defaults: Record<string, string | number | boolean> = {}
-            for (const [key, property] of Object.entries(selectedPlatform.configSchema.properties)) {
-              if (property.type !== 'credential-reference' && property.default !== undefined) {
-                defaults[key] = property.default
-              }
-            }
-            setConfiguration(defaults)
+            setConfiguration(collectConnectionDefaults(selectedPlatform))
             setCredentials({})
             setCreateStage('configuration')
             setCreateError('')
+            setWechatLogin(null)
+            if (selectedPlatform.creation?.mode === 'qr-login') {
+              try {
+                const login = await startWechatLogin()
+                if (login.status === 'confirmed') {
+                  notify('连接已创建', 'success', 'connection-create')
+                  resetCreateState()
+                  clearCreateSearchParams()
+                  return true
+                }
+              } catch (error) {
+                const message = error instanceof Error ? error.message : String(error)
+                setCreateError(message)
+                notify(message, 'error', 'connection-create')
+              }
+            }
+            return false
+          }
+          if (isQrLoginCreate) {
+            if (!isWechatIlinkLoginRestartable(wechatLogin)) return false
+            setCreateError('')
+            try {
+              const login = await startWechatLogin()
+              if (login.status === 'confirmed') {
+                notify('连接已创建', 'success', 'connection-create')
+                resetCreateState()
+                clearCreateSearchParams()
+                return true
+              }
+            } catch (error) {
+              const message = error instanceof Error ? error.message : String(error)
+              setCreateError(message)
+              notify(message, 'error', 'connection-create')
+            }
             return false
           }
           setCreateError('')
@@ -691,7 +864,9 @@ export function ConnectionsPage() {
                 label="平台"
                 value={selectedPlatformKey}
                 onValueChange={(value) => {
+                  const platform = creatablePlatforms.find((item) => item.key === value)
                   setSelectedPlatformKey(value)
+                  setCreatePlatform(platform ?? null)
                   setCreateError('')
                 }}
                 options={creatablePlatforms.map((platform) => ({
@@ -702,55 +877,84 @@ export function ConnectionsPage() {
             </>
           ) : (
             <>
-              <Button type="button" size="small" variant="ghost" onClick={() => setCreateStage('platform')}>
-                返回选择平台
-              </Button>
-              <Field label="连接别名" hint="可选，用于区分这个连接；平台名称显示为次要信息。">
-                <Input value={createAlias} maxLength={80} onChange={(event) => setCreateAlias(event.target.value)} />
-              </Field>
-              {selectedPlatform ? (
-                <AdapterConnectionExtensionSlot
-                  name="connection.adapter.setup"
-                  props={{ adapterKey: selectedPlatform.key, phase: 'setup' }}
-                />
-              ) : null}
-              {Object.entries(selectedPlatform?.configSchema.properties ?? {}).map(([key, property]) => {
-                if (property.type === 'boolean') {
-                  return (
-                    <SwitchField
-                      key={key}
-                      label={property.title}
-                      description={property.description ?? ''}
-                      checked={configuration[key] === true}
-                      onCheckedChange={(value) => setConfiguration((current) => ({ ...current, [key]: value }))}
-                    />
-                  )
-                }
-                if (property.type === 'credential-reference') {
-                  return (
-                    <Field key={key} label={property.title} hint="凭据仅可覆盖，无法查看已保存值。">
-                      <SecretInput
-                        value={credentials[key] ?? ''}
-                        onChange={(event) => setCredentials((current) => ({ ...current, [key]: event.target.value }))}
+              {isQrLoginCreate ? (
+                <div className={styles.qrLoginPanel}>
+                  <InlineFeedback tone="info">请使用平台应用扫描二维码并确认登录。</InlineFeedback>
+                  {wechatLoginQrImage ? (
+                    <div className={styles.qrLoginCode}>
+                      <img
+                        src={wechatLoginQrImage}
+                        alt={(selectedPlatform?.displayName ?? '平台') + ' 扫码登录二维码'}
                       />
-                    </Field>
-                  )
-                }
-                return (
-                  <Field key={key} label={property.title} hint={property.description}>
+                    </div>
+                  ) : null}
+                  {wechatLogin?.message ? (
+                    <InlineFeedback
+                      tone={wechatLogin.status === 'failed' || wechatLogin.status === 'expired' ? 'error' : 'info'}
+                    >
+                      {wechatLogin.message}
+                    </InlineFeedback>
+                  ) : null}
+                </div>
+              ) : (
+                <>
+                  <Button type="button" size="small" variant="ghost" onClick={() => setCreateStage('platform')}>
+                    返回选择平台
+                  </Button>
+                  <Field label="连接别名" hint="可选，用于区分这个连接；平台名称显示为次要信息。">
                     <Input
-                      type={property.type === 'number' ? 'number' : 'text'}
-                      value={typeof configuration[key] === 'boolean' ? '' : (configuration[key] ?? '')}
-                      onChange={(event) =>
-                        setConfiguration((current) => ({
-                          ...current,
-                          [key]: property.type === 'number' ? Number(event.target.value) : event.target.value,
-                        }))
-                      }
+                      value={createAlias}
+                      maxLength={80}
+                      onChange={(event) => setCreateAlias(event.target.value)}
                     />
                   </Field>
-                )
-              })}
+                  {selectedPlatform ? (
+                    <AdapterConnectionExtensionSlot
+                      name="connection.adapter.setup"
+                      props={{ adapterKey: selectedPlatform.key, phase: 'setup' }}
+                    />
+                  ) : null}
+                  {Object.entries(selectedPlatform?.configSchema.properties ?? {}).map(([key, property]) => {
+                    if (property.type === 'boolean') {
+                      return (
+                        <SwitchField
+                          key={key}
+                          label={property.title}
+                          description={property.description ?? ''}
+                          checked={configuration[key] === true}
+                          onCheckedChange={(value) => setConfiguration((current) => ({ ...current, [key]: value }))}
+                        />
+                      )
+                    }
+                    if (property.type === 'credential-reference') {
+                      return (
+                        <Field key={key} label={property.title} hint="凭据仅可覆盖，无法查看已保存值。">
+                          <SecretInput
+                            value={credentials[key] ?? ''}
+                            onChange={(event) =>
+                              setCredentials((current) => ({ ...current, [key]: event.target.value }))
+                            }
+                          />
+                        </Field>
+                      )
+                    }
+                    return (
+                      <Field key={key} label={property.title} hint={property.description}>
+                        <Input
+                          type={property.type === 'number' ? 'number' : 'text'}
+                          value={typeof configuration[key] === 'boolean' ? '' : (configuration[key] ?? '')}
+                          onChange={(event) =>
+                            setConfiguration((current) => ({
+                              ...current,
+                              [key]: property.type === 'number' ? Number(event.target.value) : event.target.value,
+                            }))
+                          }
+                        />
+                      </Field>
+                    )
+                  })}
+                </>
+              )}
             </>
           )}
           {createError ? <InlineFeedback tone="error">{createError}</InlineFeedback> : null}

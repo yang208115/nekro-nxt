@@ -11,6 +11,15 @@ import {
   type AdapterTransportService,
   type RegisteredAdapterHandle,
 } from '@nekro-nxt/adapter-sdk'
+import {
+  WECHAT_ILINK_ADAPTER_KEY,
+  WechatIlinkConnectionConfigurationSchema,
+  WechatIlinkConnectionInputSchema,
+  createWechatIlinkHostContribution,
+  createWechatIlinkSdkLoginClientFactory,
+  type WechatIlinkLoginClientFactory,
+  type WechatIlinkTransportFactory,
+} from '@nekro-nxt/adapter-wechat-ilink'
 import { ChannelRuntime } from '@nekro-nxt/channel-runtime'
 import { AssetService, CoreService } from '@nekro-nxt/core'
 import type { AgentRevisionContent, ConnectionEventRecord, ConnectionRecord } from '@nekro-nxt/core'
@@ -109,6 +118,10 @@ export interface NekroRuntimeOptions {
   readonly notifications?: { readonly fetch?: typeof fetch }
   /** Replaced by an offline Fake for tests and AI validation; production uses fetch/ws. */
   readonly adapterTransport?: AdapterTransportService
+  readonly wechatIlink?: {
+    readonly transportFactory?: WechatIlinkTransportFactory
+    readonly loginClientFactory?: WechatIlinkLoginClientFactory
+  }
 }
 
 export type ConnectionTestResult =
@@ -119,6 +132,28 @@ export type ConnectionTestResult =
       readonly message: string
     }
   | { readonly status: 'failed'; readonly kind: string; readonly message: string; readonly retryAfterMs?: number }
+
+export type WechatIlinkLoginSessionStatus = 'pending' | 'scanned' | 'confirmed' | 'expired' | 'failed' | 'cancelled'
+
+export interface WechatIlinkLoginSessionView {
+  readonly loginId: string
+  readonly status: WechatIlinkLoginSessionStatus
+  readonly qrCodeUrl?: string
+  readonly connectionId?: ConnectionId
+  readonly adapterKey?: string
+  readonly message?: string
+}
+
+interface WechatIlinkLoginSession {
+  readonly loginId: string
+  readonly abortController: AbortController
+  status: WechatIlinkLoginSessionStatus
+  qrCodeUrl?: string
+  connectionId?: ConnectionId
+  adapterKey?: string
+  message?: string
+  done: Promise<void>
+}
 
 /** One deliberate entity registry the domain API reads for its authoritative projection. */
 export interface AgentEntity {
@@ -174,6 +209,8 @@ export class NekroRuntime {
   readonly #connectionListeners = new Set<(event?: ConnectionEventRecord) => void>()
   readonly #agents = new Map<AgentId, AgentEntity>()
   readonly #unsubscribeDynamicApproval: () => void
+  readonly #wechatIlinkOptions: NonNullable<NekroRuntimeOptions['wechatIlink']>
+  readonly #wechatIlinkLoginSessions = new Map<string, WechatIlinkLoginSession>()
   #started = false
   #disposed = false
 
@@ -200,6 +237,7 @@ export class NekroRuntime {
     readonly adapterHandles: readonly RegisteredAdapterHandle[]
     readonly adapterRuntimes: Map<ConnectionId, AdapterConnectionRuntime>
     readonly adapterTransport: AdapterTransportService
+    readonly wechatIlinkOptions: NonNullable<NekroRuntimeOptions['wechatIlink']>
   }) {
     this.#database = input.database
     this.repository = input.repository
@@ -222,6 +260,7 @@ export class NekroRuntime {
     this.#adapterHandles.push(...input.adapterHandles)
     this.#adapterRuntimes = input.adapterRuntimes
     this.#adapterTransport = input.adapterTransport
+    this.#wechatIlinkOptions = input.wechatIlinkOptions
     this.#adapterDiagnostics.set(input.internalConnectionId, {
       status: 'connected',
       credentialConfigured: true,
@@ -291,9 +330,17 @@ export class NekroRuntime {
       )
       const core = new CoreService(repository, { now, nextUlid })
       const adapters = new AdapterRegistry()
-      const adapterHandles = BUILTIN_ADAPTER_CONTRIBUTIONS.map((contribution, index) =>
-        adapters.register(`builtin:${index}`, contribution),
-      )
+      const adapterHandles = BUILTIN_ADAPTER_CONTRIBUTIONS.map((contribution, index) => {
+        const resolved =
+          contribution.descriptor.key === WECHAT_ILINK_ADAPTER_KEY && options.wechatIlink !== undefined
+            ? createWechatIlinkHostContribution({
+                ...(options.wechatIlink.transportFactory === undefined
+                  ? {}
+                  : { transportFactory: options.wechatIlink.transportFactory }),
+              })
+            : contribution
+        return adapters.register(`builtin:${index}`, resolved)
+      })
       const dshPluginInstaller = new DshPluginPackageInstaller(
         repository,
         options.dshPluginRoot ?? path.join(path.dirname(options.coreDatabasePath), 'dsh'),
@@ -476,6 +523,7 @@ export class NekroRuntime {
         adapterHandles,
         adapterRuntimes,
         adapterTransport: options.adapterTransport ?? createProductionAdapterTransport(),
+        wechatIlinkOptions: options.wechatIlink ?? {},
       })
       return runtime
     } catch (error) {
@@ -866,6 +914,215 @@ export class NekroRuntime {
     const updated = this.core.updateConnectionActivityTriggerDefaults(connectionId, activityKeys)
     this.#notifyConnectionChanges()
     return updated
+  }
+
+  async updateWechatIlinkInboundMedia(
+    connectionId: ConnectionId,
+    enableInboundMedia: boolean,
+  ): Promise<ConnectionRecord> {
+    if (this.#disposed) throw new Error('NekroRuntime is disposed.')
+    const connection = this.core.getConnection(connectionId)
+    if (!connection || connection.adapterKey !== WECHAT_ILINK_ADAPTER_KEY) {
+      throw new Error('微信 iLink 连接不存在。')
+    }
+    const parsed = WechatIlinkConnectionConfigurationSchema.parse(connection.config)
+    const storedConfig = {
+      accountId: parsed.accountId,
+      baseUrl: parsed.baseUrl,
+      cdnBaseUrl: parsed.cdnBaseUrl,
+      botType: parsed.botType,
+      longPollTimeoutMs: parsed.longPollTimeoutMs,
+      enableInboundMedia,
+      enableOutboundMedia: parsed.enableOutboundMedia,
+      maxTextLength: parsed.maxTextLength,
+      ...(parsed.channelVersion === undefined ? {} : { channelVersion: parsed.channelVersion }),
+      ...(parsed.routeTag === undefined ? {} : { routeTag: parsed.routeTag }),
+    } satisfies Readonly<Record<string, JsonValue>>
+    const updated = this.core.updateConnectionConfig(connectionId, storedConfig)
+    const mounted = this.#adapterRuntimes.get(connectionId)
+    if (mounted) {
+      await mounted.stop()
+      this.#adapterRuntimes.delete(connectionId)
+      if (this.#started) await this.#mountAdapter(connectionId)
+    }
+    this.#notifyConnectionChanges()
+    return updated
+  }
+
+  async startWechatIlinkLogin(input: { readonly alias?: string | undefined }): Promise<WechatIlinkLoginSessionView> {
+    if (!this.#started || this.#disposed) throw new Error('NekroRuntime is not accepting new Connections.')
+    const loginId = 'wechat-ilink-login-' + randomUUID()
+    const abortController = new AbortController()
+    const session: WechatIlinkLoginSession = {
+      loginId,
+      abortController,
+      status: 'pending',
+      done: Promise.resolve(),
+    }
+    this.#wechatIlinkLoginSessions.set(loginId, session)
+
+    let firstQrSettled = false
+    let settleFirstQr: (() => void) | undefined
+    let rejectFirstQr: ((error: unknown) => void) | undefined
+    const firstQr = new Promise<void>((resolve, reject) => {
+      settleFirstQr = resolve
+      rejectFirstQr = reject
+    })
+    const resolveFirstQrOnce = (): void => {
+      if (firstQrSettled) return
+      firstQrSettled = true
+      settleFirstQr?.()
+    }
+    const rejectFirstQrOnce = (error: unknown): void => {
+      if (firstQrSettled) return
+      firstQrSettled = true
+      rejectFirstQr?.(error)
+    }
+
+    const loginClientFactory = this.#wechatIlinkOptions.loginClientFactory ?? createWechatIlinkSdkLoginClientFactory()
+    const loginClient = loginClientFactory()
+    session.done = (async () => {
+      try {
+        const result = await loginClient.login({
+          botType: '3',
+          timeoutMs: 480_000,
+          maxRefreshes: 3,
+          signal: abortController.signal,
+          onQRCode: (qrCodeUrl) => {
+            session.qrCodeUrl = qrCodeUrl
+            session.status = 'pending'
+            session.message = '请使用平台应用扫码并确认登录。'
+            resolveFirstQrOnce()
+            this.#notifyConnectionChanges()
+          },
+          onStatus: (status) => {
+            if (status === 'scaned') {
+              session.status = 'scanned'
+              session.message = '已扫码，请在平台应用内确认登录。'
+            } else if (status === 'expired') {
+              session.status = 'expired'
+              session.message = '二维码已过期，请重新扫码登录。'
+            } else if (status === 'confirmed') {
+              session.status = 'scanned'
+              session.message = '已确认登录，正在创建连接。'
+            } else {
+              session.status = 'pending'
+              session.message = '请使用平台应用扫码并确认登录。'
+            }
+            this.#notifyConnectionChanges()
+          },
+        })
+        if (abortController.signal.aborted || session.status === 'cancelled') return
+        if (!session.qrCodeUrl) {
+          session.status = 'failed'
+          session.message = '微信 iLink 登录流程未返回二维码。'
+          rejectFirstQrOnce(new Error(session.message))
+          return
+        }
+        if (!result.connected) {
+          session.status = session.status === 'expired' ? 'expired' : 'failed'
+          session.message = result.message || '微信 iLink 扫码登录失败。'
+          rejectFirstQrOnce(new Error(session.message))
+          return
+        }
+        if (!result.botToken?.trim() || !result.accountId?.trim()) {
+          session.status = 'failed'
+          session.message = '微信 iLink 登录结果缺少必要凭据。'
+          rejectFirstQrOnce(new Error(session.message))
+          return
+        }
+        const connection = await this.#createWechatIlinkConnectionFromLogin({
+          alias: input.alias,
+          accountId: result.accountId,
+          botToken: result.botToken,
+          baseUrl: result.baseUrl,
+        })
+        session.status = 'confirmed'
+        session.connectionId = connection.id
+        session.adapterKey = connection.adapterKey
+        session.message = '登录成功，连接已创建。'
+      } catch (error) {
+        if (abortController.signal.aborted || session.status === 'cancelled') {
+          rejectFirstQrOnce(error)
+          return
+        }
+        session.status = 'failed'
+        session.message = error instanceof Error ? error.message : String(error)
+        rejectFirstQrOnce(error)
+      } finally {
+        this.#notifyConnectionChanges()
+      }
+    })()
+
+    await firstQr
+    return this.#projectWechatIlinkLoginSession(session)
+  }
+
+  getWechatIlinkLogin(loginId: string): WechatIlinkLoginSessionView {
+    const session = this.#wechatIlinkLoginSessions.get(loginId)
+    if (!session) throw new Error('微信 iLink 登录会话不存在。')
+    return this.#projectWechatIlinkLoginSession(session)
+  }
+
+  cancelWechatIlinkLogin(loginId: string): WechatIlinkLoginSessionView {
+    const session = this.#wechatIlinkLoginSessions.get(loginId)
+    if (!session) throw new Error('微信 iLink 登录会话不存在。')
+    session.status = 'cancelled'
+    session.message = '已取消微信 iLink 扫码登录。'
+    session.abortController.abort(new Error(session.message))
+    this.#notifyConnectionChanges()
+    return this.#projectWechatIlinkLoginSession(session)
+  }
+
+  #projectWechatIlinkLoginSession(session: WechatIlinkLoginSession): WechatIlinkLoginSessionView {
+    return {
+      loginId: session.loginId,
+      status: session.status,
+      ...(session.qrCodeUrl === undefined ? {} : { qrCodeUrl: session.qrCodeUrl }),
+      ...(session.connectionId === undefined ? {} : { connectionId: session.connectionId }),
+      ...(session.adapterKey === undefined ? {} : { adapterKey: session.adapterKey }),
+      ...(session.message === undefined ? {} : { message: session.message }),
+    }
+  }
+
+  async #createWechatIlinkConnectionFromLogin(input: {
+    readonly alias?: string | undefined
+    readonly accountId: string
+    readonly botToken: string
+    readonly baseUrl?: string | undefined
+  }): Promise<ConnectionRecord> {
+    const parsed = WechatIlinkConnectionInputSchema.parse({
+      accountId: input.accountId,
+      botToken: input.botToken,
+      ...(input.baseUrl === undefined ? {} : { baseUrl: input.baseUrl }),
+    })
+    const credentialReference = await this.credentials.save(parsed.botToken)
+    const storedConfig = {
+      accountId: parsed.accountId,
+      baseUrl: parsed.baseUrl,
+      cdnBaseUrl: parsed.cdnBaseUrl,
+      botType: parsed.botType,
+      longPollTimeoutMs: parsed.longPollTimeoutMs,
+      enableInboundMedia: parsed.enableInboundMedia,
+      enableOutboundMedia: parsed.enableOutboundMedia,
+      maxTextLength: parsed.maxTextLength,
+      ...(parsed.channelVersion === undefined ? {} : { channelVersion: parsed.channelVersion }),
+      ...(parsed.routeTag === undefined ? {} : { routeTag: parsed.routeTag }),
+    } satisfies Readonly<Record<string, JsonValue>>
+    let connection: ConnectionRecord
+    try {
+      connection = this.core.createConnection({
+        adapterKey: WECHAT_ILINK_ADAPTER_KEY,
+        ...(input.alias === undefined ? {} : { alias: input.alias }),
+        config: storedConfig,
+        credentialRefs: { botToken: credentialReference },
+      })
+    } catch (error) {
+      await this.credentials.delete(credentialReference)
+      throw error
+    }
+    await this.#mountAdapter(connection.id)
+    return connection
   }
 
   async deleteConnection(
@@ -1358,6 +1615,11 @@ export class NekroRuntime {
     const failures: unknown[] = []
     this.#unsubscribeDynamicApproval()
     this.#connectionListeners.clear()
+    for (const session of this.#wechatIlinkLoginSessions.values()) {
+      session.status = 'cancelled'
+      session.message = '运行时正在关闭。'
+      session.abortController.abort(new Error(session.message))
+    }
     for (const operation of [
       () => this.channels.stopProcessingFeedback(),
       () => this.activation.dispose(),
@@ -1371,6 +1633,11 @@ export class NekroRuntime {
     }
     const stopped = await Promise.allSettled([...this.#adapterRuntimes.values()].map((runtime) => runtime.stop()))
     for (const outcome of stopped) if (outcome.status === 'rejected') failures.push(outcome.reason)
+    const loginSessions = await Promise.allSettled(
+      [...this.#wechatIlinkLoginSessions.values()].map((session) => session.done),
+    )
+    for (const outcome of loginSessions) if (outcome.status === 'rejected') failures.push(outcome.reason)
+    this.#wechatIlinkLoginSessions.clear()
     try {
       await this.host.dispose()
     } catch (error) {

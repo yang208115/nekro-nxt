@@ -32,6 +32,7 @@ import {
   promptDocumentFromText,
   promptDocumentPlainText,
   PromptDocumentV1Schema,
+  JsonValueSchema,
 } from '@nekro-nxt/contracts'
 import { createHash } from 'node:crypto'
 import { monotonicFactory } from 'ulid'
@@ -251,6 +252,7 @@ export interface CoreRepository {
   ): void
   createConnection(record: ConnectionRecord): void
   updateConnectionAlias(id: ConnectionId, alias?: string): void
+  updateConnectionConfig(id: ConnectionId, config: JsonValue): void
   updateConnectionActivityTriggerDefaults(id: ConnectionId, activityKeys: readonly AdapterActivityKey[]): void
   archiveConnection(id: ConnectionId, archivedAt: number): void
   restoreConnection(id: ConnectionId): void
@@ -768,6 +770,14 @@ export class CoreService {
       }
     }
     return { ...current, alias: normalizedAlias }
+  }
+
+  updateConnectionConfig(connectionId: ConnectionId, config: JsonValue): ConnectionRecord {
+    const current = this.#repository.getConnection(connectionId)
+    if (!current) throw new Error('Unknown connection: ' + connectionId)
+    const parsedConfig = JsonValueSchema.parse(config)
+    this.#repository.updateConnectionConfig(connectionId, parsedConfig)
+    return { ...current, config: parsedConfig }
   }
 
   updateConnectionActivityTriggerDefaults(

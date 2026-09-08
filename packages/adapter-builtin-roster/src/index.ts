@@ -3,6 +3,7 @@ import { createQQOpenClawHostContribution } from '@nekro-nxt/adapter-qq-openclaw
 import type { AdapterHostContributionV2 } from '@nekro-nxt/adapter-sdk'
 import { WEB_HOST_CONTRIBUTION } from '@nekro-nxt/adapter-web'
 import { createWeComAiBotHostContribution } from '@nekro-nxt/adapter-wecom-ai-bot'
+import { createWechatIlinkHostContribution } from '@nekro-nxt/adapter-wechat-ilink'
 
 /** The only static composition point for first-party Adapter packages. */
 export const BUILTIN_ADAPTER_CONTRIBUTIONS: readonly AdapterHostContributionV2[] = Object.freeze([
@@ -10,4 +11,5 @@ export const BUILTIN_ADAPTER_CONTRIBUTIONS: readonly AdapterHostContributionV2[]
   createQQOpenClawHostContribution(),
   createOneBot11HostContribution(),
   createWeComAiBotHostContribution(),
+  createWechatIlinkHostContribution(),
 ])

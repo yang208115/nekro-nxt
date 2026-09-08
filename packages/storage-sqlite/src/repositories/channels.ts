@@ -49,6 +49,7 @@ type ChannelRepository = Pick<
   CoreRepository,
   | 'createConnection'
   | 'updateConnectionAlias'
+  | 'updateConnectionConfig'
   | 'updateConnectionActivityTriggerDefaults'
   | 'archiveConnection'
   | 'restoreConnection'
@@ -261,6 +262,17 @@ export function createChannelsRepository(database: DrizzleCoreDatabase): Channel
         database
           .update(connections)
           .set({ alias: normalizeConnectionAlias(alias) ?? null })
+          .where(and(eq(connections.id, id), isNull(connections.archivedAt)))
+          .run().changes !== 1
+      ) {
+        throw new Error(`Unknown connection: ${id}`)
+      }
+    },
+    updateConnectionConfig(id, config): void {
+      if (
+        database
+          .update(connections)
+          .set({ config })
           .where(and(eq(connections.id, id), isNull(connections.archivedAt)))
           .run().changes !== 1
       ) {

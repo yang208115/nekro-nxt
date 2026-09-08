@@ -337,15 +337,19 @@ type AdapterConnectionWireSchema = {
   readonly properties: Readonly<Record<string, AdapterConfigurationProperty>>
 }
 
+type KnownObjectKeys<T> = {
+  [Key in keyof T]: string extends Key ? never : number extends Key ? never : Key
+}[keyof T]
+
 type AdapterConnectionProperties<
   ConfigurationSchema extends AdapterSchemaObject,
   CredentialsSchema extends AdapterSchemaObject,
 > = {
-  [Key in Extract<keyof z.output<ConfigurationSchema>, string>]: AdapterConfigurationPropertyFor<
+  [Key in Extract<KnownObjectKeys<z.output<ConfigurationSchema>>, string>]: AdapterConfigurationPropertyFor<
     z.output<ConfigurationSchema>[Key]
   >
 } & {
-  [Key in Extract<keyof z.output<CredentialsSchema>, string>]: AdapterCredentialPropertyFor<
+  [Key in Extract<KnownObjectKeys<z.output<CredentialsSchema>>, string>]: AdapterCredentialPropertyFor<
     z.output<CredentialsSchema>[Key]
   >
 }
@@ -413,6 +417,12 @@ export type AdapterConnectionDescriptor<
     readonly receive: boolean
     readonly send: boolean
   }
+  /** Optional product-owned Connection creation flow. Schema-form remains the default. */
+  readonly creation?: {
+    readonly mode: 'schema-form' | 'qr-login'
+    readonly actionLabel?: string
+    readonly pendingLabel?: string
+  }
   readonly configSchema: [ConfigurationSchema] extends [never]
     ? AdapterConnectionWireSchema
     : [CredentialsSchema] extends [never]
@@ -453,6 +463,7 @@ export function defineAdapterConnection<
   readonly activities?: readonly AdapterActivityDefinition[]
   readonly features?: AdapterConnectionDescriptor['features']
   readonly diagnostics?: { readonly receive: boolean; readonly send: boolean }
+  readonly creation?: AdapterConnectionDescriptor['creation']
   readonly configurationSchema: ConfigurationSchema
   readonly credentialsSchema: CredentialsSchema
   readonly configSchema: AdapterConnectionUiSchema<ConfigurationSchema, CredentialsSchema>
@@ -474,6 +485,7 @@ export function defineAdapterConnection<
         receive: input.provisioning === 'user-created',
         send: input.provisioning === 'user-created',
       },
+      ...(input.creation === undefined ? {} : { creation: input.creation }),
       configSchema: input.configSchema,
     },
     configurationSchema: input.configurationSchema,

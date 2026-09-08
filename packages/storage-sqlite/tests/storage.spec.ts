@@ -645,6 +645,43 @@ describe('Core SQLite baseline', () => {
     }
   })
 
+  it('persists and reloads an updated Connection config without changing identity', async () => {
+    const { directory, database, core, connection } = await createFixture()
+    const filename = path.join(directory, 'core.sqlite')
+    let databaseClosed = false
+    try {
+      const updated = core.updateConnectionConfig(connection.id, {
+        enableInboundMedia: false,
+        maxTextLength: 4000,
+      })
+      expect(updated).toMatchObject({
+        id: connection.id,
+        adapterKey: 'fixture-alpha',
+        config: { enableInboundMedia: false, maxTextLength: 4000 },
+      })
+      expect(database.db.select({ config: connections.config }).from(connections).get()?.config).toEqual({
+        enableInboundMedia: false,
+        maxTextLength: 4000,
+      })
+      database.close()
+      databaseClosed = true
+
+      const reopened = await openMigratedCoreDatabase(filename)
+      try {
+        const reopenedRepository = new SqliteCoreRepository(reopened)
+        expect(reopenedRepository.getConnection(connection.id)).toMatchObject({
+          id: connection.id,
+          adapterKey: 'fixture-alpha',
+          config: { enableInboundMedia: false, maxTextLength: 4000 },
+        })
+      } finally {
+        reopened.close()
+      }
+    } finally {
+      if (!databaseClosed) database.close()
+    }
+  })
+
   it('rejects a non-baseline development database instead of upgrading it', async () => {
     const directory = await temporaryDirectory()
     const filename = path.join(directory, 'legacy.sqlite')

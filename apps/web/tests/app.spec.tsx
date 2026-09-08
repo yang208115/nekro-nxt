@@ -39,12 +39,21 @@ const emptyChannelId = ChannelIdSchema.parse('chn_empty')
 const externalChannelId = ChannelIdSchema.parse('chn_external')
 const browserConnectionId = ConnectionIdSchema.parse('con_webinternal')
 const externalConnectionId = ConnectionIdSchema.parse('con_external')
+const wechatConnectionId = ConnectionIdSchema.parse('con_wechatilink')
 const browserExtensionId = ExtensionIdSchema.parse('ext_internal')
 const browserExtensionRevisionId = ExtensionRevisionIdSchema.parse('xrv_internal')
 const browserExtensionPreviousRevisionId = ExtensionRevisionIdSchema.parse('xrv_previous')
 const browserEpisodeId = EpisodeIdSchema.parse('eps_browser')
 const browserEventId = ChannelEventIdSchema.parse('evt_current')
 const otherEventId = ChannelEventIdSchema.parse('evt_other')
+const wechatIlinkConfigSchemaProperties = {
+  enableInboundMedia: {
+    type: 'boolean',
+    title: '入站图片接收',
+    description: '开启后，微信 iLink 收到的图片会下载并导入为频道图片资源。',
+    default: true,
+  },
+} as const
 const hostUiPage = (id: string, visible = true) =>
   HostUiPageEntrySchema.parse({
     pageInstanceId: `hup_${id}`,
@@ -1568,6 +1577,268 @@ describe.sequential('NekroNxt browser projections', { timeout: 30_000 }, () => {
       },
       aliasedSnapshot,
     )
+  })
+
+  it('keeps the add-account action visible while a system-managed connection is selected', async () => {
+    const snapshot = HostApiContracts.snapshot.response.parse({
+      ...browserSnapshot,
+      connectionAdapters: [
+        ...browserSnapshot.connectionAdapters,
+        {
+          key: 'wechat-ilink',
+          displayName: '微信 iLink',
+          description: '接收微信私聊文本消息',
+          provisioning: 'user-created',
+          aliasEditable: true,
+          channelDiscovery: 'adapter-observed',
+          channelKinds: ['direct'],
+          activities: [],
+          features: {},
+          diagnostics: { receive: true, send: true },
+          creation: { mode: 'qr-login', actionLabel: '扫码登录', pendingLabel: '等待扫码确认…' },
+          configSchema: {
+            schemaVersion: 1,
+            type: 'object',
+            required: [],
+            properties: wechatIlinkConfigSchemaProperties,
+          },
+        },
+      ],
+    })
+
+    await withProductPage(
+      `/connections/${browserConnectionId}`,
+      async (page) => {
+        const addButton = page.getByRole('button', { name: '添加平台连接' })
+        await playwrightExpect(addButton).toBeVisible()
+        await addButton.click()
+
+        const dialog = page.getByRole('dialog')
+        await playwrightExpect(dialog.getByText('选择要连接的平台账号。', { exact: true })).toBeVisible()
+        await dialog.getByLabel('平台').click()
+        await playwrightExpect(page.getByRole('option', { name: '微信 iLink' })).toBeVisible()
+        await page.getByRole('option', { name: '微信 iLink' }).click()
+        await page.getByRole('button', { name: '扫码登录' }).click()
+
+        await playwrightExpect(dialog.getByText('使用平台应用扫码登录。登录成功后会自动创建平台连接。')).toBeVisible()
+        const qrImage = dialog.getByRole('img', { name: '微信 iLink 扫码登录二维码' })
+        await playwrightExpect(qrImage).toBeVisible()
+        await playwrightExpect(qrImage).toHaveAttribute('src', /^data:image\/svg\+xml;charset=UTF-8,/u)
+        await playwrightExpect(dialog).not.toContainText('打开二维码链接')
+        await playwrightExpect(dialog).not.toContainText('https://qr.example.invalid/login-fixture')
+        await playwrightExpect(dialog.getByText('请使用平台应用扫码并确认登录。', { exact: true })).toBeVisible()
+        await playwrightExpect(dialog).not.toContainText('机器人账号 ID')
+        await playwrightExpect(dialog).not.toContainText('访问令牌')
+        await playwrightExpect(dialog).not.toContainText('API 地址')
+        await playwrightExpect(dialog).not.toContainText('CDN 地址')
+      },
+      snapshot,
+      async (page) => {
+        await page.route('**/api/connections/wechat-ilink/login', async (request) => {
+          await request.fulfill({
+            status: 201,
+            contentType: 'application/json',
+            body: JSON.stringify({
+              loginId: 'login-fixture',
+              status: 'pending',
+              qrCodeUrl: 'https://qr.example.invalid/login-fixture',
+              message: '请使用平台应用扫码并确认登录。',
+            }),
+          })
+        })
+      },
+    )
+  })
+
+  it('keeps the wechat iLink QR login open across host refreshes', async () => {
+    const snapshot = HostApiContracts.snapshot.response.parse({
+      ...browserSnapshot,
+      connectionAdapters: [
+        ...browserSnapshot.connectionAdapters,
+        {
+          key: 'wechat-ilink',
+          displayName: '微信 iLink',
+          description: '接收微信私聊文本消息',
+          provisioning: 'user-created',
+          aliasEditable: true,
+          channelDiscovery: 'adapter-observed',
+          channelKinds: ['direct'],
+          activities: [],
+          features: {},
+          diagnostics: { receive: true, send: true },
+          creation: { mode: 'qr-login', actionLabel: '扫码登录', pendingLabel: '等待扫码确认…' },
+          configSchema: {
+            schemaVersion: 1,
+            type: 'object',
+            required: [],
+            properties: wechatIlinkConfigSchemaProperties,
+          },
+        },
+      ],
+    })
+
+    await withProductPage(
+      '/connections/' + browserConnectionId + '?create=1&adapter=wechat-ilink',
+      async (page) => {
+        const dialog = page.getByRole('dialog')
+        await playwrightExpect(dialog.getByText('登录 微信 iLink')).toBeVisible()
+        await page.getByRole('button', { name: '扫码登录' }).click()
+        const qrImage = dialog.getByRole('img', { name: '微信 iLink 扫码登录二维码' })
+        await playwrightExpect(qrImage).toBeVisible()
+        await playwrightExpect(qrImage).toHaveAttribute('src', /^data:image\/svg\+xml;charset=UTF-8,/u)
+        await page.evaluate(async () => {
+          const isPropertyBag = (value: unknown): value is Record<string, unknown> =>
+            (typeof value === 'object' || typeof value === 'function') && value !== null
+          const isZeroArgFunction = (value: unknown): value is () => unknown => typeof value === 'function'
+          const productStoreModule = '/src/product-store.ts'
+          const store: unknown = await import(productStoreModule)
+          if (!isPropertyBag(store)) {
+            throw new Error('Product store module is unavailable.')
+          }
+          const useProductStore = store['useProductStore']
+          if (!isPropertyBag(useProductStore)) {
+            throw new Error('Product store hook is unavailable.')
+          }
+          const getState = useProductStore['getState']
+          if (!isZeroArgFunction(getState)) throw new Error('Product store state accessor is unavailable.')
+          const state: unknown = getState()
+          if (!isPropertyBag(state)) {
+            throw new Error('Host refresh action is unavailable.')
+          }
+          const refreshHost = state['refreshHost']
+          if (!isZeroArgFunction(refreshHost)) throw new Error('Host refresh action is unavailable.')
+          await refreshHost()
+        })
+        await page.waitForTimeout(250)
+        await playwrightExpect(dialog.getByText('登录 微信 iLink')).toBeVisible()
+        await playwrightExpect(qrImage).toBeVisible()
+        await playwrightExpect(dialog).not.toContainText('选择平台')
+      },
+      snapshot,
+      async (page) => {
+        let loginStarted = false
+        await page.route('**/api/snapshot', async (request) => {
+          await request.fulfill({
+            status: 200,
+            contentType: 'application/json',
+            body: JSON.stringify(loginStarted ? browserSnapshot : snapshot),
+          })
+        })
+        await page.route('**/api/connections/wechat-ilink/login', async (request) => {
+          loginStarted = true
+          await request.fulfill({
+            status: 201,
+            contentType: 'application/json',
+            body: JSON.stringify({
+              loginId: 'login-fixture',
+              status: 'pending',
+              qrCodeUrl: 'https://qr.example.invalid/login-fixture',
+              message: '请使用平台应用扫码并确认登录。',
+            }),
+          })
+        })
+        await page.route('**/api/connections/wechat-ilink/login/login-fixture', async (request) => {
+          await request.fulfill({
+            status: 200,
+            contentType: 'application/json',
+            body: JSON.stringify({
+              loginId: 'login-fixture',
+              status: 'pending',
+              qrCodeUrl: 'https://qr.example.invalid/login-fixture',
+              message: '请使用平台应用扫码并确认登录。',
+            }),
+          })
+        })
+      },
+    )
+  })
+
+  it('renders and updates the wechat iLink inbound image setting from connection details', async () => {
+    const wechatSnapshot = HostApiContracts.snapshot.response.parse({
+      ...browserSnapshot,
+      connectionAdapters: [
+        ...browserSnapshot.connectionAdapters,
+        {
+          key: 'wechat-ilink',
+          displayName: '微信 iLink',
+          description: '接收微信私聊文本消息',
+          provisioning: 'user-created',
+          aliasEditable: true,
+          channelDiscovery: 'adapter-observed',
+          channelKinds: ['direct'],
+          activities: [],
+          features: {},
+          diagnostics: { receive: true, send: true },
+          creation: { mode: 'qr-login', actionLabel: '扫码登录', pendingLabel: '等待扫码确认…' },
+          configSchema: {
+            schemaVersion: 1,
+            type: 'object',
+            required: [],
+            properties: wechatIlinkConfigSchemaProperties,
+          },
+        },
+      ],
+      connections: [
+        ...browserSnapshot.connections,
+        {
+          id: wechatConnectionId,
+          adapterKey: 'wechat-ilink',
+          activityTriggerDefaults: [],
+          status: { state: 'connected', credentialConfigured: true, proactiveSend: false, activities: {} },
+          channelCount: 0,
+          knownChannels: [],
+          adapterSettings: { wechatIlink: { enableInboundMedia: false } },
+        },
+      ],
+    })
+    let inboundMediaEnabled = false
+    let updateRequestBody: unknown
+
+    await withProductPage(
+      '/connections/' + wechatConnectionId,
+      async (page) => {
+        await playwrightExpect(page.getByText('微信 iLink 设置', { exact: true })).toBeVisible()
+        await playwrightExpect(page.getByText('入站图片接收', { exact: true })).toBeVisible()
+        const toggle = page.getByRole('switch', { name: '入站图片接收' })
+        await playwrightExpect(toggle).toHaveAttribute('aria-checked', 'false')
+        await toggle.click()
+        await playwrightExpect(toggle).toHaveAttribute('aria-checked', 'true')
+      },
+      wechatSnapshot,
+      async (page) => {
+        await page.route('**/api/snapshot', async (request) => {
+          await request.fulfill({
+            status: 200,
+            contentType: 'application/json',
+            body: JSON.stringify({
+              ...wechatSnapshot,
+              connections: wechatSnapshot.connections.map((connection) =>
+                connection.id === wechatConnectionId
+                  ? {
+                      ...connection,
+                      adapterSettings: { wechatIlink: { enableInboundMedia: inboundMediaEnabled } },
+                    }
+                  : connection,
+              ),
+            }),
+          })
+        })
+        await page.route(
+          '**/api/connections/' + wechatConnectionId + '/wechat-ilink/inbound-media',
+          async (request) => {
+            updateRequestBody = request.request().postDataJSON()
+            inboundMediaEnabled =
+              HostApiContracts.updateWechatIlinkInboundMedia.parseRequest(updateRequestBody).enableInboundMedia
+            await request.fulfill({
+              status: 200,
+              contentType: 'application/json',
+              body: JSON.stringify({ connectionId: wechatConnectionId, enableInboundMedia: inboundMediaEnabled }),
+            })
+          },
+        )
+      },
+    )
+    expect(updateRequestBody).toEqual({ enableInboundMedia: true })
   })
 
   it('isolates Channel messages, renders a true empty state, and names the send target', async () => {

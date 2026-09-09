@@ -281,4 +281,33 @@ describe('WeChat iLink inbound normalization', () => {
       ),
     ).toBeUndefined()
   })
+
+  it('ignores bot echoes, self messages and deleted messages', () => {
+    const userText = {
+      from_user_id: 'wechat-user-1',
+      message_id: 1,
+      item_list: [{ item_type: 1, text_item: { text: 'hi' } }],
+    }
+    expect(
+      normalizeWechatIlinkInboundMessage(
+        { ...userText, message_type: 2 },
+        { now: () => 1, accountId: 'wx_account_fixture' },
+      ),
+    ).toBeUndefined()
+    expect(
+      normalizeWechatIlinkInboundMessage(
+        { ...userText, from_user_id: 'hex@im.bot' },
+        { now: () => 1, accountId: 'hex-im-bot' },
+      ),
+    ).toBeUndefined()
+    expect(
+      normalizeWechatIlinkInboundMessage(
+        { ...userText, delete_time_ms: 9_000 },
+        { now: () => 1, accountId: 'wx_account_fixture' },
+      ),
+    ).toBeUndefined()
+    expect(normalizeWechatIlinkInboundMessage(userText, { now: () => 1, accountId: 'wx_account_fixture' })).toMatchObject({
+      platformUserId: 'wechat-user-1',
+    })
+  })
 })

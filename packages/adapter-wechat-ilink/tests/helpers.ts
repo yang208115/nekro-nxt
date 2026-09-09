@@ -35,6 +35,7 @@ export const createFakeContext = () => {
   const events: AdapterChannelInboundEvent[] = []
   const diagnostics: AdapterConnectionDiagnostic[] = []
   const importedAssets: Array<{ readonly bytes: Uint8Array; readonly declaredMediaType?: string }> = []
+  const remoteFetches: Array<{ readonly url: string; readonly maxBytes: number }> = []
   const states = new Map<string, JsonValue>()
   const channels = new Map<string, ReturnType<typeof ChannelIdSchema.parse>>()
   const members = new Map<string, ReturnType<typeof ChannelMemberIdSchema.parse>>()
@@ -99,6 +100,17 @@ export const createFakeContext = () => {
         })
       },
       read: () => Promise.resolve({ bytes: new Uint8Array([1, 2, 3]), mediaType: 'text/plain', byteSize: 3 }),
+      fetchRemoteBytes: (input) => {
+        remoteFetches.push({ url: input.url, maxBytes: input.maxBytes })
+        if (input.url.includes('127.0.0.1') || input.url.includes('169.254.169.254')) {
+          return Promise.reject(new Error('远程资源地址解析到了不允许的网络。'))
+        }
+        return Promise.resolve({
+          bytes: new Uint8Array([137, 80, 78, 71]),
+          declaredMediaType: 'image/png',
+          filename: 'pixel.png',
+        })
+      },
     },
     credentials: { resolve: () => Promise.resolve('token-secret') },
     state: {
@@ -119,7 +131,7 @@ export const createFakeContext = () => {
     },
     transport: new FakeAdapterTransport(),
   }
-  return { context, events, diagnostics, importedAssets, states, channels, members }
+  return { context, events, diagnostics, importedAssets, remoteFetches, states, channels, members }
 }
 
 export class FakeWechatIlinkTransport implements WechatIlinkTransport {
@@ -129,6 +141,7 @@ export class FakeWechatIlinkTransport implements WechatIlinkTransport {
   config: WechatIlinkTransportConfig | undefined
   startInput: WechatIlinkTransportStartInput | undefined
   stopped = false
+  sendTextResult: { readonly platformMessageId?: string; readonly clientId?: string } = { clientId: 'wechat-client-1' }
 
   start(input: WechatIlinkTransportStartInput): Promise<void> {
     this.startInput = input
@@ -153,7 +166,7 @@ export class FakeWechatIlinkTransport implements WechatIlinkTransport {
     readonly signal: AbortSignal
   }) {
     this.sent.push({ toUserId: input.toUserId, text: input.text, contextToken: input.contextToken })
-    return Promise.resolve({ clientId: 'wechat-client-1' })
+    return Promise.resolve(this.sendTextResult)
   }
 
   emitMessage(message: WechatIlinkMessage): void {

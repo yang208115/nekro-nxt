@@ -30,7 +30,7 @@
 | 频道本地名称 | `POST /api/channels/:channelId/display-name` | 只改展示名 |
 | 创建连接 | `POST /api/connections` | 按已安装 Adapter schema 创建，可选保存 80 字符以内的连接别名 |
 | 微信 iLink 扫码登录 | `POST/GET/DELETE /api/connections/wechat-ilink/login` | 宿主登录会话生成二维码；确认后创建连接并写入只写凭据 |
-| 微信 iLink 入站媒体 | `POST /api/connections/:connectionId/wechat-ilink/inbound-media` | 更新已有微信 iLink 连接的入站图片接收开关并重新挂载 Runtime |
+| 微信 iLink 入站媒体 | `POST /api/connections/:connectionId/wechat-ilink/inbound-media` | 更新已有微信 iLink 连接的入站媒体接收开关并重新挂载 Runtime |
 | 修改连接别名 | `POST /api/connections/:connectionId/alias` | trim 后保存或清除用户连接的别名；系统托管连接拒绝编辑 |
 | 修改连接活动默认值 | `POST /api/connections/:connectionId/activity-trigger-defaults` | 保存这个具体 Connection 的可触发频道活动默认开启列表 |
 | 删除连接 | `DELETE /api/connections/:connectionId` | 显式提交 `deleteChannelData`；归档保留频道数据，永久删除则清理 Connection 范围事实 |

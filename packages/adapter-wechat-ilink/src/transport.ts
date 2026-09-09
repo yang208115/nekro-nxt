@@ -37,6 +37,20 @@ type WechatIlinkSdkLoginModule = {
 const isReceipt = (value: unknown): value is WechatIlinkTransportReceipt =>
   typeof value === 'object' && value !== null && !Array.isArray(value)
 
+const receiptFromSdk = (value: unknown): WechatIlinkTransportReceipt => {
+  if (typeof value === 'string' && value.trim()) return { clientId: value }
+  if (!isReceipt(value)) return {}
+  const platformMessageId =
+    typeof value.platformMessageId === 'string' && value.platformMessageId.trim()
+      ? value.platformMessageId
+      : undefined
+  const clientId = typeof value.clientId === 'string' && value.clientId.trim() ? value.clientId : undefined
+  return {
+    ...(platformMessageId === undefined ? {} : { platformMessageId }),
+    ...(clientId === undefined ? {} : { clientId }),
+  }
+}
+
 export class WechatIlinkSdkTransport implements WechatIlinkTransport {
   readonly #client: WechatIlinkSdkClient
   #startTask: Promise<void> | undefined
@@ -84,8 +98,7 @@ export class WechatIlinkSdkTransport implements WechatIlinkTransport {
   }): Promise<WechatIlinkTransportReceipt> {
     if (input.signal.aborted) throw input.signal.reason
     const receipt = await this.#client.sendText(input.toUserId, input.text, input.contextToken)
-    if (isReceipt(receipt)) return receipt
-    return {}
+    return receiptFromSdk(receipt)
   }
 }
 

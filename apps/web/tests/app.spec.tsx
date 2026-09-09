@@ -49,8 +49,8 @@ const otherEventId = ChannelEventIdSchema.parse('evt_other')
 const wechatIlinkConfigSchemaProperties = {
   enableInboundMedia: {
     type: 'boolean',
-    title: '入站图片接收',
-    description: '开启后，微信 iLink 收到的图片会下载并导入为频道图片资源。',
+    title: '入站媒体接收',
+    description: '开启后，微信 iLink 收到的图片和文件会下载并导入为频道资源。',
     default: true,
   },
 } as const
@@ -1753,7 +1753,7 @@ describe.sequential('NekroNxt browser projections', { timeout: 30_000 }, () => {
     )
   })
 
-  it('renders and updates the wechat iLink inbound image setting from connection details', async () => {
+  it('renders and updates the wechat iLink inbound media setting from connection details', async () => {
     const wechatSnapshot = HostApiContracts.snapshot.response.parse({
       ...browserSnapshot,
       connectionAdapters: [
@@ -1798,8 +1798,8 @@ describe.sequential('NekroNxt browser projections', { timeout: 30_000 }, () => {
       '/connections/' + wechatConnectionId,
       async (page) => {
         await playwrightExpect(page.getByText('微信 iLink 设置', { exact: true })).toBeVisible()
-        await playwrightExpect(page.getByText('入站图片接收', { exact: true })).toBeVisible()
-        const toggle = page.getByRole('switch', { name: '入站图片接收' })
+        await playwrightExpect(page.getByText('入站媒体接收', { exact: true })).toBeVisible()
+        const toggle = page.getByRole('switch', { name: '入站媒体接收' })
         await playwrightExpect(toggle).toHaveAttribute('aria-checked', 'false')
         await toggle.click()
         await playwrightExpect(toggle).toHaveAttribute('aria-checked', 'true')

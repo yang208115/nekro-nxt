@@ -13,6 +13,7 @@ import {
 const WECHAT_TEXT_ITEM_TYPE = 1
 const WECHAT_IMAGE_ITEM_TYPE = 2
 const WECHAT_FILE_ITEM_TYPE = 4
+const WECHAT_BOT_MESSAGE_TYPE = 2
 
 export const encodeWechatId = (id: string): string => Buffer.from(id, 'utf8').toString('base64url')
 
@@ -31,6 +32,26 @@ export const contextTokenStateKey = (userId: string): string =>
   WECHAT_ILINK_CONTEXT_TOKEN_STATE_PREFIX + platformChannelIdFromUserId(userId)
 
 const itemType = (item: WechatIlinkMessageItem): number | undefined => item.item_type ?? item.type
+
+const normalizedWechatAccountId = (value: string): string => value.trim().toLowerCase().replace(/[@.]/g, '-')
+
+export const wechatAccountIdsMatch = (left: string, right: string): boolean => {
+  const first = left.trim()
+  const second = right.trim()
+  if (!first || !second) return false
+  return first === second || normalizedWechatAccountId(first) === normalizedWechatAccountId(second)
+}
+
+export const isWechatIlinkDeletedMessage = (message: WechatIlinkMessage): boolean => {
+  const deletedAt = message.delete_time_ms
+  return typeof deletedAt === 'number' && Number.isFinite(deletedAt) && deletedAt > 0
+}
+
+export const isWechatIlinkInboundEcho = (message: WechatIlinkMessage, accountId?: string): boolean => {
+  if (message.message_type === WECHAT_BOT_MESSAGE_TYPE) return true
+  const fromUserId = message.from_user_id?.trim()
+  return Boolean(accountId && fromUserId && wechatAccountIdsMatch(fromUserId, accountId))
+}
 
 const trimmedString = (value: unknown): string | undefined => {
   if (typeof value !== 'string') return undefined
@@ -214,6 +235,7 @@ export interface WechatIlinkNormalizedInboundMessage {
 
 export interface WechatIlinkNormalizeOptions {
   readonly now: () => number
+  readonly accountId?: string
 }
 
 const platformMessageId = (message: WechatIlinkMessage): string | undefined => {
@@ -229,6 +251,8 @@ export const normalizeWechatIlinkInboundMessage = (
   message: WechatIlinkMessage,
   options: WechatIlinkNormalizeOptions,
 ): WechatIlinkNormalizedInboundMessage | undefined => {
+  if (isWechatIlinkDeletedMessage(message)) return undefined
+  if (isWechatIlinkInboundEcho(message, options.accountId)) return undefined
   const fromUserId = message.from_user_id?.trim()
   if (!fromUserId) return undefined
   const id = platformMessageId(message)

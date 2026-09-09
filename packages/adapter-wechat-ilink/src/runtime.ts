@@ -47,7 +47,6 @@ export interface WechatIlinkRuntimeOptions {
   readonly context: AdapterConnectionHostContext
   readonly config: WechatIlinkRuntimeConfig
   readonly transportFactory?: WechatIlinkTransportFactory
-  readonly fetch?: typeof fetch
 }
 
 const isRecord = (value: unknown): value is Readonly<Record<string, unknown>> =>
@@ -62,10 +61,7 @@ export const classifyWechatIlinkError = (error: unknown): WechatIlinkClassifiedE
   if (status === 429 || lower.includes('429') || lower.includes('rate')) return { kind: 'rate-limited', message }
   if (
     code === -14 ||
-    lower.includes('-14') ||
-    lower.includes('session') ||
-    lower.includes('auth') ||
-    lower.includes('token')
+    /session expired|session timeout|unauthorized|unauthorised|authentication|invalid token|expired token/u.test(lower)
   ) {
     return { kind: 'authentication', message }
   }
@@ -89,7 +85,6 @@ export class WechatIlinkRuntime implements AdapterConnectionRuntime {
   readonly #context: AdapterConnectionHostContext
   readonly #config: ReturnType<typeof WechatIlinkRuntimeConfigSchema.parse>
   readonly #transportFactory: WechatIlinkTransportFactory
-  readonly #fetch: typeof fetch
   #transport: WechatIlinkTransport | undefined
   #abort: AbortController | undefined
   #running = false
@@ -99,7 +94,6 @@ export class WechatIlinkRuntime implements AdapterConnectionRuntime {
     this.#context = options.context
     this.#config = WechatIlinkRuntimeConfigSchema.parse(options.config)
     this.#transportFactory = options.transportFactory ?? createWechatIlinkSdkTransportFactory()
-    this.#fetch = options.fetch ?? fetch
     this.capabilities = {
       outbound: { ...WECHAT_ILINK_CAPABILITIES, maxTextLength: this.#config.maxTextLength },
       activities: {},
@@ -256,7 +250,10 @@ export class WechatIlinkRuntime implements AdapterConnectionRuntime {
 
   async #receive(message: WechatIlinkMessage, generation: number, signal: AbortSignal): Promise<void> {
     if (!this.#running || generation !== this.#generation || signal.aborted) return
-    const normalized = normalizeWechatIlinkInboundMessage(message, { now: this.#context.now })
+    const normalized = normalizeWechatIlinkInboundMessage(message, {
+      now: this.#context.now,
+      accountId: this.#config.accountId,
+    })
     if (!normalized) return
     if (normalized.facts['hasGroupId'] === true) {
       this.#context.diagnostics.publish({
@@ -368,52 +365,21 @@ export class WechatIlinkRuntime implements AdapterConnectionRuntime {
       }
     }
     if (!attachment.url) throw new Error('媒体没有可下载来源。')
-    const url = new URL(attachment.url)
-    if (url.protocol !== 'https:') throw new Error('媒体地址必须使用 HTTPS。')
-    const timeoutSignal = AbortSignal.timeout(15_000)
-    const requestSignal = AbortSignal.any([signal, timeoutSignal])
-    const response = await this.#fetch(url, { redirect: 'error', signal: requestSignal })
-    if (!response.ok) throw new Error('媒体下载失败。')
-    const declaredLength = response.headers.get('content-length')
-    const declaredByteSize = declaredLength === null ? undefined : Number(declaredLength)
-    if (
-      declaredByteSize !== undefined &&
-      Number.isFinite(declaredByteSize) &&
-      declaredByteSize > WECHAT_ILINK_MAX_INBOUND_ASSET_BYTES
-    ) {
-      throw new Error('媒体超过大小上限。')
-    }
-    if (!response.body) throw new Error('媒体响应没有可读取内容。')
-    const reader = response.body.getReader()
-    const chunks: Uint8Array[] = []
-    let byteLength = 0
-    try {
-      while (true) {
-        const chunk = await reader.read()
-        if (chunk.done) break
-        byteLength += chunk.value.byteLength
-        if (byteLength > WECHAT_ILINK_MAX_INBOUND_ASSET_BYTES) {
-          await reader.cancel('媒体超过大小上限。')
-          throw new Error('媒体超过大小上限。')
-        }
-        chunks.push(chunk.value)
-      }
-    } finally {
-      reader.releaseLock()
-    }
-    const bytes = new Uint8Array(byteLength)
-    let offset = 0
-    for (const chunk of chunks) {
-      bytes.set(chunk, offset)
-      offset += chunk.byteLength
-    }
-    const responseMediaType = response.headers.get('content-type')?.split(';', 1)[0]?.trim()
-    const declaredMediaType = attachment.mediaType ?? responseMediaType
+    if (signal.aborted) throw signal.reason
+    const remote = await this.#context.assets.fetchRemoteBytes({
+      url: attachment.url,
+      maxBytes: WECHAT_ILINK_MAX_INBOUND_ASSET_BYTES,
+    })
+    if (signal.aborted) throw signal.reason
+    const declaredMediaType = attachment.mediaType ?? remote.declaredMediaType
     const asset = await this.#context.assets.importBytes({
-      bytes,
+      bytes: remote.bytes,
       ...(declaredMediaType === undefined ? {} : { declaredMediaType }),
     })
-    return { assetId: asset.assetId }
+    return {
+      assetId: asset.assetId,
+      ...(remote.filename === undefined ? {} : { fileName: remote.filename }),
+    }
   }
 
   #toSdkDownloadItem(attachment: WechatIlinkInboundMediaAttachment): WechatIlinkMessageItem {

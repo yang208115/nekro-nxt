@@ -264,4 +264,51 @@ describe('WeChat iLink Server driver', () => {
       await runtime.dispose()
     }
   })
+
+  it('rejects generic connection creation for qr-login WeChat iLink', async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'nekro-nxt-wechat-ilink-create-'))
+    temporaryDirectories.push(directory)
+    const runtime = await NekroRuntime.create({
+      coreDatabasePath: path.join(directory, 'core.sqlite'),
+      sessionDatabasePath: path.join(directory, 'sessions.sqlite'),
+      assetRoot: path.join(directory, 'assets'),
+      extensionDataRoot: path.join(directory, 'extension-data'),
+      extensionCacheRoot: path.join(directory, 'extension-cache'),
+      credentialRoot: path.join(directory, 'credentials'),
+      wechatIlink: {
+        loginClientFactory: () => new FakeWechatIlinkLoginClient(),
+        transportFactory: () => new FakeWechatIlinkTransport(),
+      },
+    })
+    await runtime.start()
+
+    const webContext = new Context()
+    await webContext.plugin(WebServer, { host: '127.0.0.1', port: 0 })
+    const api = createNekroHostApi(webContext.webServer, runtime)
+    const origin = `http://127.0.0.1:${api.port}`
+
+    try {
+      await expect(runtime.createConnection({ adapterKey: 'wechat-ilink', configuration: {} })).rejects.toThrow(
+        '该连接需要通过扫码登录创建，不能使用通用配置表单。',
+      )
+
+      const response = await fetch(origin + '/api/connections', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ adapterKey: 'wechat-ilink', configuration: {} }),
+      })
+      expect(response.status).toBe(400)
+      await expect(response.json()).resolves.toMatchObject({
+        error: {
+          code: 'connection-failed',
+          message: '该连接需要通过扫码登录创建，不能使用通用配置表单。',
+        },
+      })
+      expect(runtime.core.listConnections().filter((connection) => connection.adapterKey === 'wechat-ilink')).toEqual([])
+    } finally {
+      api.dispose()
+      await webContext.fiber.dispose()
+      await runtime.dispose()
+    }
+  })
 })

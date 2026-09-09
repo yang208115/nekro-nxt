@@ -208,7 +208,7 @@ export function ConnectionsPage() {
     try {
       await useProductStore.getState().updateWechatIlinkInboundMedia(selected.id, enabled)
       notify(
-        enabled ? '微信 iLink 入站图片接收已开启。' : '微信 iLink 入站图片接收已关闭。',
+        enabled ? '微信 iLink 入站媒体接收已开启。' : '微信 iLink 入站媒体接收已关闭。',
         'success',
         'connection-media:' + selected.id,
       )
@@ -599,8 +599,8 @@ export function ConnectionsPage() {
                     <div className={styles.connectionAliasEditor}>
                       <div className={styles.sectionHeading}>微信 iLink 设置</div>
                       <SwitchField
-                        label="入站图片接收"
-                        description="开启后，微信 iLink 收到的图片会下载并导入为频道图片资源；关闭时只记录可解释的占位内容。"
+                        label="入站媒体接收"
+                        description="开启后，微信 iLink 收到的图片和文件会下载并导入为频道资源；关闭时只记录可解释的占位内容。"
                         checked={wechatIlinkSettings.enableInboundMedia}
                         disabled={mediaSettingsPending}
                         onCheckedChange={(checked) => void updateWechatIlinkInboundMedia(checked)}

@@ -826,6 +826,9 @@ export class NekroRuntime {
     if (!this.#started || this.#disposed) throw new Error('NekroRuntime is not accepting new Connections.')
     const contribution = this.adapters.get(input.adapterKey)
     if (contribution?.descriptor.provisioning !== 'user-created') throw new Error('该连接平台不可由用户创建。')
+    if (contribution.descriptor.creation?.mode === 'qr-login') {
+      throw new Error('该连接需要通过扫码登录创建，不能使用通用配置表单。')
+    }
     const descriptor = contribution.descriptor
     const configurationInput = input.configuration ?? {}
     const credentialsInput = input.credentials ?? {}
@@ -978,6 +981,14 @@ export class NekroRuntime {
       firstQrSettled = true
       rejectFirstQr?.(error)
     }
+    const firstQrTimeout = setTimeout(() => {
+      if (firstQrSettled) return
+      const error = new Error('微信 iLink 登录超时，未生成二维码。')
+      session.status = 'failed'
+      session.message = error.message
+      abortController.abort(error)
+      rejectFirstQrOnce(error)
+    }, 15_000)
 
     const loginClientFactory = this.#wechatIlinkOptions.loginClientFactory ?? createWechatIlinkSdkLoginClientFactory()
     const loginClient = loginClientFactory()
@@ -1051,10 +1062,17 @@ export class NekroRuntime {
         rejectFirstQrOnce(error)
       } finally {
         this.#notifyConnectionChanges()
+        if (session.status !== 'pending' && session.status !== 'scanned') {
+          this.#scheduleWechatIlinkLoginSessionRemoval(loginId)
+        }
       }
     })()
 
-    await firstQr
+    try {
+      await firstQr
+    } finally {
+      clearTimeout(firstQrTimeout)
+    }
     return this.#projectWechatIlinkLoginSession(session)
   }
 
@@ -1071,6 +1089,7 @@ export class NekroRuntime {
     session.message = '已取消微信 iLink 扫码登录。'
     session.abortController.abort(new Error(session.message))
     this.#notifyConnectionChanges()
+    this.#scheduleWechatIlinkLoginSessionRemoval(loginId)
     return this.#projectWechatIlinkLoginSession(session)
   }
 
@@ -1083,6 +1102,15 @@ export class NekroRuntime {
       ...(session.adapterKey === undefined ? {} : { adapterKey: session.adapterKey }),
       ...(session.message === undefined ? {} : { message: session.message }),
     }
+  }
+
+  #scheduleWechatIlinkLoginSessionRemoval(loginId: string): void {
+    setTimeout(() => {
+      const session = this.#wechatIlinkLoginSessions.get(loginId)
+      if (!session) return
+      if (session.status === 'pending' || session.status === 'scanned') return
+      this.#wechatIlinkLoginSessions.delete(loginId)
+    }, 60_000)
   }
 
   async #createWechatIlinkConnectionFromLogin(input: {

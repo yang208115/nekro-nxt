@@ -1123,7 +1123,7 @@ export class HttpProductHost implements ProductHostPort {
       const connectionId = typeof input?.['connectionId'] === 'string' ? input['connectionId'] : ''
       const enableInboundMedia = input?.['enableInboundMedia']
       if (!connectionId.trim()) throw new Error('缺少连接标识，请刷新页面后重试。')
-      if (typeof enableInboundMedia !== 'boolean') throw new Error('入站图片接收设置格式无效，请重新操作。')
+      if (typeof enableInboundMedia !== 'boolean') throw new Error('入站媒体接收设置格式无效，请重新操作。')
       const result = await this.#call(
         HostApiContracts.updateWechatIlinkInboundMedia,
         { connectionId },

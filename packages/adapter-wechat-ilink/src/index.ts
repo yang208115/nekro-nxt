@@ -13,7 +13,7 @@ import {
 import { WechatIlinkRuntime, type WechatIlinkRuntimeOptions } from './runtime.js'
 
 export const createWechatIlinkHostContribution = (
-  options?: Pick<WechatIlinkRuntimeOptions, 'transportFactory' | 'fetch'>,
+  options?: Pick<WechatIlinkRuntimeOptions, 'transportFactory'>,
 ): AdapterHostContributionV2 => ({
   apiVersion: 2,
   descriptor: WECHAT_ILINK_CONNECTION_DEFINITION.descriptor,
@@ -26,7 +26,6 @@ export const createWechatIlinkHostContribution = (
           botTokenCredentialRef: stored.credentialRefs['botToken'],
         }),
         ...(options?.transportFactory === undefined ? {} : { transportFactory: options.transportFactory }),
-        ...(options?.fetch === undefined ? {} : { fetch: options.fetch }),
       }),
     ),
 })

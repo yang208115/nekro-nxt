@@ -110,20 +110,10 @@ describe('WeChat iLink Runtime', () => {
     const transport = new FakeWechatIlinkTransport()
     const context = createFakeContext()
     const imageBytes = new Uint8Array([137, 80, 78, 71])
-    const fetchImage = vi.fn<typeof fetch>((url) => {
-      const requestedUrl = typeof url === 'string' ? url : url instanceof URL ? url.href : url.url
-      expect(requestedUrl).toBe('https://media.example.invalid/pixel.png')
-      return Promise.resolve(
-        new Response(imageBytes, {
-          headers: { 'content-type': 'image/png', 'content-length': String(imageBytes.byteLength) },
-        }),
-      )
-    })
     const runtime = new WechatIlinkRuntime({
       context: context.context,
       config: runtimeConfig,
       transportFactory: () => transport,
-      fetch: fetchImage,
     })
 
     await runtime.start()
@@ -146,7 +136,7 @@ describe('WeChat iLink Runtime', () => {
     })
     await waitFor(() => context.events.length === 1)
 
-    expect(fetchImage).toHaveBeenCalledTimes(1)
+    expect(context.remoteFetches).toEqual([{ url: 'https://media.example.invalid/pixel.png', maxBytes: 20 * 1024 * 1024 }])
     expect(context.importedAssets).toEqual([{ bytes: imageBytes, declaredMediaType: 'image/png' }])
     expect(context.events[0]).toMatchObject({
       adapterKey: 'wechat-ilink',
@@ -172,12 +162,10 @@ describe('WeChat iLink Runtime', () => {
     const context = createFakeContext()
     const imageBytes = new Uint8Array([255, 216, 255, 217])
     transport.downloadedMedia = { kind: 'image', data: imageBytes }
-    const fetchImage = vi.fn<typeof fetch>()
     const runtime = new WechatIlinkRuntime({
       context: context.context,
       config: runtimeConfig,
       transportFactory: () => transport,
-      fetch: fetchImage,
     })
 
     await runtime.start()
@@ -200,7 +188,7 @@ describe('WeChat iLink Runtime', () => {
     })
     await waitFor(() => context.events.length === 1)
 
-    expect(fetchImage).not.toHaveBeenCalled()
+    expect(context.remoteFetches).toEqual([])
     expect(transport.downloadMediaCalls).toHaveLength(1)
     expect(transport.downloadMediaCalls[0]).toMatchObject({
       type: 2,
@@ -233,12 +221,10 @@ describe('WeChat iLink Runtime', () => {
     const context = createFakeContext()
     const fileBytes = new Uint8Array([37, 80, 68, 70])
     transport.downloadedMedia = { kind: 'file', data: fileBytes, fileName: '说明.pdf' }
-    const fetchFile = vi.fn<typeof fetch>()
     const runtime = new WechatIlinkRuntime({
       context: context.context,
       config: runtimeConfig,
       transportFactory: () => transport,
-      fetch: fetchFile,
     })
 
     await runtime.start()
@@ -261,7 +247,7 @@ describe('WeChat iLink Runtime', () => {
     })
     await waitFor(() => context.events.length === 1)
 
-    expect(fetchFile).not.toHaveBeenCalled()
+    expect(context.remoteFetches).toEqual([])
     expect(transport.downloadMediaCalls).toHaveLength(1)
     expect(transport.downloadMediaCalls[0]).toMatchObject({
       type: 4,
@@ -297,7 +283,6 @@ describe('WeChat iLink Runtime', () => {
       context: context.context,
       config: runtimeConfig,
       transportFactory: () => transport,
-      fetch: vi.fn<typeof fetch>(),
     })
 
     await runtime.start()
@@ -458,6 +443,107 @@ describe('WeChat iLink Runtime', () => {
       kind: 'authentication',
     })
     expect(classifyWechatIlinkError(new Error('fetch failed'))).toMatchObject({ kind: 'transient' })
+    expect(classifyWechatIlinkError(new Error('missing context_token'))).toMatchObject({ kind: 'transient' })
+  })
+
+  it('drops bot echoes, self messages and deleted inbound events', async () => {
+    const transport = new FakeWechatIlinkTransport()
+    const context = createFakeContext()
+    const runtime = new WechatIlinkRuntime({
+      context: context.context,
+      config: runtimeConfig,
+      transportFactory: () => transport,
+    })
+
+    await runtime.start()
+    transport.emitMessage({
+      message_id: 'bot-echo-1',
+      from_user_id: 'wechat-user-1',
+      message_type: 2,
+      context_token: 'context-token-echo',
+      item_list: [{ item_type: 1, text_item: { text: '自己发的' } }],
+    })
+    transport.emitMessage({
+      message_id: 'self-message-1',
+      from_user_id: 'wechat-account-1',
+      context_token: 'context-token-self',
+      item_list: [{ item_type: 1, text_item: { text: '账号自己' } }],
+    })
+    transport.emitMessage({
+      message_id: 'deleted-message-1',
+      from_user_id: 'wechat-user-1',
+      delete_time_ms: 9_000,
+      context_token: 'context-token-deleted',
+      item_list: [{ item_type: 1, text_item: { text: '已删除' } }],
+    })
+
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(context.events).toEqual([])
+    expect(context.channels.size).toBe(0)
+  })
+
+  it('does not import inbound media from private HTTPS URLs', async () => {
+    const transport = new FakeWechatIlinkTransport()
+    const context = createFakeContext()
+    const runtime = new WechatIlinkRuntime({
+      context: context.context,
+      config: runtimeConfig,
+      transportFactory: () => transport,
+    })
+
+    await runtime.start()
+    transport.emitMessage({
+      message_id: 'private-image-1',
+      from_user_id: 'wechat-user-private',
+      create_time_ms: 9_500,
+      context_token: 'context-token-private',
+      item_list: [
+        {
+          item_type: 2,
+          image_item: {
+            url: 'https://127.0.0.1/pixel.png',
+            file_name: 'pixel.png',
+            mime_type: 'image/png',
+          },
+        },
+      ],
+    })
+    await waitFor(() => context.events.length === 1)
+
+    expect(context.remoteFetches).toEqual([{ url: 'https://127.0.0.1/pixel.png', maxBytes: 20 * 1024 * 1024 }])
+    expect(context.importedAssets).toEqual([])
+    expect(context.events[0]).toMatchObject({
+      parts: [{ type: 'rich', adapterKey: 'wechat-ilink', kind: 'image', summary: '微信 iLink 图片下载失败。' }],
+    })
+  })
+
+  it('maps SDK string send receipts to client IDs', async () => {
+    const errors: unknown[] = []
+    const transport = new WechatIlinkSdkTransport({
+      on: vi.fn(),
+      start: vi.fn(() => Promise.resolve()),
+      stop: vi.fn(),
+      sendText: vi.fn(() => Promise.resolve('wechat-ilink:123-abcd')),
+    })
+
+    await transport.start({
+      signal: new AbortController().signal,
+      longPollTimeoutMs: 1_234,
+      loadSyncBuf: () => Promise.resolve(undefined),
+      saveSyncBuf: () => Promise.resolve(),
+      onMessage: vi.fn(),
+      onError: (error) => errors.push(error),
+      onSessionExpired: vi.fn(),
+    })
+    await expect(
+      transport.sendText({
+        toUserId: 'wechat-user-1',
+        text: '收到喵',
+        contextToken: 'context-token-1',
+        signal: new AbortController().signal,
+      }),
+    ).resolves.toEqual({ clientId: 'wechat-ilink:123-abcd' })
+    expect(errors).toEqual([])
   })
 
   it('reports SDK start loop failures after the transport has started', async () => {

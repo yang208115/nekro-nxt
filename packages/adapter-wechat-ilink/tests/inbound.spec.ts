@@ -59,6 +59,7 @@ describe('WeChat iLink inbound normalization', () => {
     const message = {
       message_id: 'image-message-1',
       from_user_id: 'wechat-user-image',
+      message_type: 1,
       create_time_ms: 5_000,
       item_list: [
         { item_type: 1, text_item: { text: '看图' } },
@@ -282,7 +283,7 @@ describe('WeChat iLink inbound normalization', () => {
     ).toBeUndefined()
   })
 
-  it('ignores bot echoes, self messages and deleted messages', () => {
+  it('ignores bot echoes, exact self messages and deleted messages without conflating normalized IDs', () => {
     const userText = {
       from_user_id: 'wechat-user-1',
       message_id: 1,
@@ -297,16 +298,24 @@ describe('WeChat iLink inbound normalization', () => {
     expect(
       normalizeWechatIlinkInboundMessage(
         { ...userText, from_user_id: 'hex@im.bot' },
-        { now: () => 1, accountId: 'hex-im-bot' },
+        { now: () => 1, accountId: 'hex@im.bot' },
       ),
     ).toBeUndefined()
+    expect(
+      normalizeWechatIlinkInboundMessage(
+        { ...userText, from_user_id: 'hex@im.bot' },
+        { now: () => 1, accountId: 'hex-im-bot' },
+      ),
+    ).toMatchObject({ platformUserId: 'hex@im.bot' })
     expect(
       normalizeWechatIlinkInboundMessage(
         { ...userText, delete_time_ms: 9_000 },
         { now: () => 1, accountId: 'wx_account_fixture' },
       ),
     ).toBeUndefined()
-    expect(normalizeWechatIlinkInboundMessage(userText, { now: () => 1, accountId: 'wx_account_fixture' })).toMatchObject({
+    expect(
+      normalizeWechatIlinkInboundMessage(userText, { now: () => 1, accountId: 'wx_account_fixture' }),
+    ).toMatchObject({
       platformUserId: 'wechat-user-1',
     })
   })

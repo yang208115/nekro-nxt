@@ -22,8 +22,8 @@ interface WechatIlinkSdkClient {
     readonly saveSyncBuf: (syncBuf: string) => Promise<void>
   }): Promise<void>
   stop?(): Promise<void> | void
-  downloadMedia?(item: WechatIlinkMessageItem): Promise<WechatIlinkDownloadedMedia | null>
-  sendText(toUserId: string, text: string, contextToken: string): Promise<unknown>
+  downloadMedia?(item: WechatIlinkMessageItem, signal?: AbortSignal): Promise<WechatIlinkDownloadedMedia | null>
+  sendText(toUserId: string, text: string, contextToken: string, signal?: AbortSignal): Promise<unknown>
 }
 
 type WechatIlinkSdkModule = {
@@ -41,9 +41,7 @@ const receiptFromSdk = (value: unknown): WechatIlinkTransportReceipt => {
   if (typeof value === 'string' && value.trim()) return { clientId: value }
   if (!isReceipt(value)) return {}
   const platformMessageId =
-    typeof value.platformMessageId === 'string' && value.platformMessageId.trim()
-      ? value.platformMessageId
-      : undefined
+    typeof value.platformMessageId === 'string' && value.platformMessageId.trim() ? value.platformMessageId : undefined
   const clientId = typeof value.clientId === 'string' && value.clientId.trim() ? value.clientId : undefined
   return {
     ...(platformMessageId === undefined ? {} : { platformMessageId }),
@@ -85,7 +83,7 @@ export class WechatIlinkSdkTransport implements WechatIlinkTransport {
 
   async downloadMedia(item: WechatIlinkMessageItem, signal: AbortSignal): Promise<WechatIlinkDownloadedMedia | null> {
     if (signal.aborted) throw signal.reason
-    const media = await this.#client.downloadMedia?.(item)
+    const media = await this.#client.downloadMedia?.(item, signal)
     if (signal.aborted) throw signal.reason
     return media ?? null
   }
@@ -97,7 +95,8 @@ export class WechatIlinkSdkTransport implements WechatIlinkTransport {
     readonly signal: AbortSignal
   }): Promise<WechatIlinkTransportReceipt> {
     if (input.signal.aborted) throw input.signal.reason
-    const receipt = await this.#client.sendText(input.toUserId, input.text, input.contextToken)
+    const receipt = await this.#client.sendText(input.toUserId, input.text, input.contextToken, input.signal)
+    if (input.signal.aborted) throw input.signal.reason
     return receiptFromSdk(receipt)
   }
 }

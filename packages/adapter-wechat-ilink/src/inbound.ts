@@ -33,13 +33,11 @@ export const contextTokenStateKey = (userId: string): string =>
 
 const itemType = (item: WechatIlinkMessageItem): number | undefined => item.item_type ?? item.type
 
-const normalizedWechatAccountId = (value: string): string => value.trim().toLowerCase().replace(/[@.]/g, '-')
-
 export const wechatAccountIdsMatch = (left: string, right: string): boolean => {
   const first = left.trim()
   const second = right.trim()
   if (!first || !second) return false
-  return first === second || normalizedWechatAccountId(first) === normalizedWechatAccountId(second)
+  return first === second
 }
 
 export const isWechatIlinkDeletedMessage = (message: WechatIlinkMessage): boolean => {

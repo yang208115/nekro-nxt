@@ -52,16 +52,33 @@ export interface WechatIlinkRuntimeOptions {
 const isRecord = (value: unknown): value is Readonly<Record<string, unknown>> =>
   typeof value === 'object' && value !== null
 
+const numericErrorField = (record: Readonly<Record<string, unknown>> | undefined, key: string): number | undefined => {
+  const value = record?.[key]
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined
+}
+
 export const classifyWechatIlinkError = (error: unknown): WechatIlinkClassifiedError => {
   const message = error instanceof Error ? error.message : String(error)
   const lower = message.toLowerCase()
   const record = isRecord(error) ? error : undefined
-  const status = typeof record?.['status'] === 'number' ? record['status'] : undefined
-  const code = typeof record?.['errcode'] === 'number' ? record['errcode'] : undefined
-  if (status === 429 || lower.includes('429') || lower.includes('rate')) return { kind: 'rate-limited', message }
+  const cause = isRecord(record?.['cause']) ? record['cause'] : undefined
+  const status = numericErrorField(record, 'status') ?? numericErrorField(cause, 'status')
+  const codes = [
+    numericErrorField(record, 'errcode'),
+    numericErrorField(record, 'ret'),
+    numericErrorField(cause, 'errcode'),
+    numericErrorField(cause, 'ret'),
+  ]
+  if (status === 429 || /\b429\b|rate[ -]?limit|too many requests/u.test(lower)) {
+    return { kind: 'rate-limited', message }
+  }
   if (
-    code === -14 ||
-    /session expired|session timeout|unauthorized|unauthorised|authentication|invalid token|expired token/u.test(lower)
+    status === 401 ||
+    status === 403 ||
+    codes.includes(-14) ||
+    /(?:ret|errcode)\s*=\s*-14\b|session (?:expired|timeout)|stale token|unauthori[sz]ed|authentication|not authenticated|forbidden|invalid token|expired token|token expired/u.test(
+      lower,
+    )
   ) {
     return { kind: 'authentication', message }
   }

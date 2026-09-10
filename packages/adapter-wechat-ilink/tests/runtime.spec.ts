@@ -1,5 +1,6 @@
 import type { PhysicalDeliveryRequest } from '@nekro-nxt/adapter-sdk'
 import { LogicalMessageIdSchema, PhysicalDeliveryIdSchema } from '@nekro-nxt/contracts'
+import { ApiClient, MessageItemType, WeChatClient } from 'wechat-ilink-client'
 import { describe, expect, it, vi } from 'vitest'
 import {
   WECHAT_ILINK_SYNC_BUF_STATE_KEY,
@@ -120,6 +121,7 @@ describe('WeChat iLink Runtime', () => {
     transport.emitMessage({
       message_id: 'wechat-image-message-1',
       from_user_id: 'wechat-user-image',
+      message_type: 1,
       create_time_ms: 9_100,
       context_token: 'context-token-image',
       item_list: [
@@ -136,7 +138,9 @@ describe('WeChat iLink Runtime', () => {
     })
     await waitFor(() => context.events.length === 1)
 
-    expect(context.remoteFetches).toEqual([{ url: 'https://media.example.invalid/pixel.png', maxBytes: 20 * 1024 * 1024 }])
+    expect(context.remoteFetches).toEqual([
+      { url: 'https://media.example.invalid/pixel.png', maxBytes: 20 * 1024 * 1024 },
+    ])
     expect(context.importedAssets).toEqual([{ bytes: imageBytes, declaredMediaType: 'image/png' }])
     expect(context.events[0]).toMatchObject({
       adapterKey: 'wechat-ilink',
@@ -442,8 +446,97 @@ describe('WeChat iLink Runtime', () => {
     expect(classifyWechatIlinkError({ errcode: -14, message: 'session expired' })).toMatchObject({
       kind: 'authentication',
     })
+    expect(classifyWechatIlinkError({ status: 401, message: 'request rejected' })).toMatchObject({
+      kind: 'authentication',
+    })
+    expect(classifyWechatIlinkError({ cause: { status: 403 }, message: 'request rejected' })).toMatchObject({
+      kind: 'authentication',
+    })
+    expect(classifyWechatIlinkError(new Error('sendMessage failed: ret=-14 errmsg=credential stale'))).toMatchObject({
+      kind: 'authentication',
+    })
     expect(classifyWechatIlinkError(new Error('fetch failed'))).toMatchObject({ kind: 'transient' })
     expect(classifyWechatIlinkError(new Error('missing context_token'))).toMatchObject({ kind: 'transient' })
+  })
+
+  it('rejects successful HTTP responses carrying protocol send errors', async () => {
+    const fetchMock = vi.fn(() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ ret: -14, errcode: 0, errmsg: 'credential stale' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      ),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    try {
+      const client = new ApiClient({ token: 'token-fixture', baseUrl: 'https://ilink-api.test' })
+      await expect(
+        client.sendMessage({
+          msg: {
+            to_user_id: 'wechat-user-1',
+            message_type: 2,
+            item_list: [{ type: MessageItemType.TEXT, text_item: { text: '测试' } }],
+          },
+        }),
+      ).rejects.toThrow('ret=-14')
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('preserves SDK HTTP status for authentication error classification', async () => {
+    const fetchMock = vi.fn(() => Promise.resolve(new Response('request rejected', { status: 401 })))
+    vi.stubGlobal('fetch', fetchMock)
+    try {
+      const client = new ApiClient({ token: 'token-fixture', baseUrl: 'https://ilink-api.test' })
+      let thrown: unknown
+      try {
+        await client.sendMessage({ msg: { to_user_id: 'wechat-user-1', message_type: 2 } })
+      } catch (error) {
+        thrown = error
+      }
+      expect(classifyWechatIlinkError(thrown)).toMatchObject({ kind: 'authentication' })
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('propagates abort signals into SDK media downloads', async () => {
+    let requestSignal: AbortSignal | null = null
+    const fetchMock = vi.fn((_url: string | URL | Request, init?: RequestInit) => {
+      requestSignal = init?.signal ?? null
+      return new Promise<Response>((_resolve, reject) => {
+        requestSignal?.addEventListener(
+          'abort',
+          () => {
+            reject(new DOMException('The operation was aborted.', 'AbortError'))
+          },
+          { once: true },
+        )
+      })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    try {
+      const controller = new AbortController()
+      const client = new WeChatClient({
+        accountId: 'wechat-account-1',
+        token: 'token-fixture',
+        cdnBaseUrl: 'https://ilink-cdn.test/c2c',
+      })
+      const downloading = client.downloadMedia(
+        {
+          type: MessageItemType.IMAGE,
+          image_item: { media: { encrypt_query_param: 'encrypted-query-fixture' } },
+        },
+        controller.signal,
+      )
+      await vi.waitFor(() => expect(requestSignal).toBe(controller.signal))
+      controller.abort(new Error('connection stopped'))
+      await expect(downloading).rejects.toMatchObject({ name: 'AbortError' })
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 
   it('drops bot echoes, self messages and deleted inbound events', async () => {

@@ -169,12 +169,12 @@ export class WechatIlinkRuntime implements AdapterConnectionRuntime {
     this.#context.diagnostics.publish({ status: 'stopped', credentialConfigured: true, proactiveSend: false })
   }
 
-  async planOutbound(input: {
+  planOutbound(input: {
     readonly connectionId: ConnectionId
     readonly channelId: ChannelId
     readonly parts: readonly MessagePart[]
   }): Promise<readonly AdapterPhysicalPlan[]> {
-    return [{ parts: input.parts }]
+    return Promise.resolve([{ parts: input.parts }])
   }
 
   async deliver(request: PhysicalDeliveryRequest, signal: AbortSignal): Promise<AdapterDeliveryReceipt> {
